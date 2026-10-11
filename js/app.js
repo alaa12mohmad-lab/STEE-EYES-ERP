@@ -35,8 +35,8 @@
 
   function create(sb, rootEl, doc) {
     doc = doc || root.document;
-    var NAV = [['entry', 'قيد جديد'], ['entries', 'القيود'], ['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
-    var S = { view: 'accounts', ent: null, entries: [], entLines: {}, openE: null, rev: null, parties: [], projects: [], ccs: [], rows: [], roleMap: {}, gform: null, user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
+    var NAV = [['entry', 'قيد اليومية'], ['entries', 'سجل القيود'], ['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
+    var S = { view: 'accounts', cur: undefined, pages: [], pg: { id: null, no: null, entries: [], reversed: {} }, reg: null, hl: null, ent: null, entries: [], entLines: {}, openE: null, rev: null, parties: [], projects: [], ccs: [], rows: [], roleMap: {}, gform: null, user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
 
     function $(sel) { return rootEl.querySelector(sel); }
     function toast(msg) {
@@ -236,7 +236,7 @@
 
     function enterCompany(id) {
       S.company = S.companies.filter(function (c) { return c.id === id; })[0]; if (!S.company) return Promise.resolve();
-      store('company', id); S.q = ''; S.form = null; S.err = ''; S.ent = null;
+      store('company', id); S.q = ''; S.form = null; S.err = ''; S.ent = null; S.cur = undefined; S.pages = []; S.reg = null;
       S.view = 'accounts';
       return loadAccounts().then(viewAccounts, function (e) { fail(e); viewAccounts(); });
     }
@@ -256,17 +256,17 @@
     function loadView() {
       var id = S.company.id;
       if (S.view === 'accounts') return loadAccounts();
-      if (S.view === 'entry') return Promise.all([loadAccounts(),
+      if (S.view === 'entry' || S.view === 'entries') return Promise.all([loadAccounts(),
         sb.from('projects').select('id,code,name,status').eq('company_id', id).order('code'),
         sb.from('cost_centers').select('id,code,name,active').eq('company_id', id).order('code'),
-        sb.from('party_companies').select('party_id,active,parties(id,name,kind,active)').eq('company_id', id)]).then(function (r) {
+        sb.from('party_companies').select('party_id,active,parties(id,name,kind,active)').eq('company_id', id), loadPages()]).then(function (r) {
         for (var i = 1; i < 4; i++) if (r[i].error) throw r[i].error;
         S.projects = r[1].data || []; S.ccs = r[2].data || [];
         S.parties = (r[3].data || []).filter(function (x) { return x.active && x.parties && x.parties.active; }).map(function (x) { return x.parties; }).sort(function (a, b) { return a.name.localeCompare(b.name, 'ar'); });
-        if (!S.ent) S.ent = loadDraft() || newSheet();
-      });
-      if (S.view === 'entries') return sb.from('journal_entries').select('*').eq('company_id', id).order('fiscal_year', { ascending: false }).order('entry_no', { ascending: false }).limit(300).then(function (r) {
-        if (r.error) throw r.error; S.entries = r.data || []; S.entLines = {}; S.openE = null;
+        if (S.view === 'entries') { regInit(); return runRegister(); }
+        if (S.cur === undefined) S.cur = null;
+        if (!S.ent) S.ent = loadDraft(S.cur) || newSheet();
+        return loadPageContent(S.cur);
       });
       if (S.view === 'roles') return Promise.all([loadAccounts(), sb.from('account_roles').select('role_code,account_id').eq('company_id', id)]).then(function (r) {
         if (r[1].error) throw r[1].error;
@@ -352,10 +352,18 @@
       if (act === 'sh-delline') { var pr = id.split(':'); S.ent.entries[+pr[0]].lines.splice(+pr[1], 1); saveDraft(); return viewEntry(); }
       if (act === 'sh-save') return saveAll();
       if (act === 'sh-hidelog') { S.ent.saved = []; return viewEntry(); }
-      if (act === 'sh-clear') { if (root.confirm && S.ent.entries.some(entryUsed) && !root.confirm('تفريغ الورقة كلها؟')) return; S.ent = newSheet(); clearDraft(); return viewEntry(); }
-      if (act === 'eopen') return openEntry(id);
+      if (act === 'sh-clear') { if (root.confirm && S.ent.entries.some(entryUsed) && !root.confirm('تفريغ القيود الجديدة؟')) return; S.ent = newSheet(); clearDraft(); return viewEntry(); }
+      if (act === 'eopen') { S.reg.open[id] = !S.reg.open[id]; return viewEntries(); }
+      if (act === 'pg-first' || act === 'pg-prev' || act === 'pg-next' || act === 'pg-last') return navTo(act.slice(3));
+      if (act === 'pg-new') return openPage(null);
+      if (act === 'pg-print') return root.print && root.print();
+      if (act === 'pg-csv') return download('قيد-' + S.cur + '.csv', entriesCsv(S.pg.entries));
+      if (act === 'reg-page') { S.view = 'entry'; return Promise.resolve(loadView()).then(function () { return openPage(+id, t.getAttribute('data-e')); }); }
+      if (act === 'reg-clear') { S.reg.f = blankRegF(); S.reg.p = 0; return runRegister().then(viewEntries); }
+      if (act === 'reg-prev' || act === 'reg-next') { S.reg.p += act === 'reg-next' ? 1 : -1; return runRegister().then(viewEntries, function (e) { fail(e); viewEntries(); }); }
+      if (act === 'reg-csv') return download('سجل-القيود.csv', entriesCsv(S.reg.rows.map(function (e) { return Object.assign({}, e, { lines: S.reg.lines[e.id] || [] }); })));
       if (act === 'erev') { S.rev = { id: id, date: today(), reason: '', err: '' }; return renderRev(); }
-      if (act === 'revcancel') { S.rev = null; return viewEntries(); }
+      if (act === 'revcancel') { S.rev = null; return S.view === 'entries' ? viewEntries() : viewEntry(); }
       if (act === 'gadd') return openG(null);
       if (act === 'gedit') return openG(id);
       if (act === 'gcancel') { S.gform = null; return render(); }
@@ -399,6 +407,7 @@
       ev.preventDefault();
       if (kind === 'acc') return submitAccount(form);
       if (kind === 'rev') return submitRev(form);
+      if (kind === 'regf') { readRegF(form); S.reg.p = 0; S.err = ''; return runRegister().then(viewEntries, function (e) { fail(e); viewEntries(); }); }
       if (kind === 'gen') return submitG(form);
       if (kind === 'roles') return saveRoles(form);
       if (kind === 'link') return linkParty(form);
@@ -593,12 +602,12 @@
     function blankLine() { return { acc: '', party: '', payee: '', project: '', cc: '', debit: '', credit: '' }; }
     function blankEntry(date) { return { k: ++uid, date: date || today(), desc: '', in_manara: false, manara_no: '', lines: [blankLine(), blankLine()], errs: [] }; }
     function newSheet() { return { type: 'regular', entries: [blankEntry()], saved: [], busy: false }; }
-    function draftKey() { return 'draft:' + S.company.id; }
-    function saveDraft() { try { localStorage.setItem(draftKey(), JSON.stringify({ type: S.ent.type, entries: S.ent.entries })); } catch (e) { } }
-    function clearDraft() { try { localStorage.removeItem(draftKey()); } catch (e) { } }
-    function loadDraft() {
+    function draftKey(no) { return 'draft:' + S.company.id + ':' + (no === undefined ? (S.cur === null || S.cur === undefined ? 'new' : S.cur) : (no === null ? 'new' : no)); }
+    function saveDraft() { try { if (S.ent.entries.some(entryUsed)) localStorage.setItem(draftKey(), JSON.stringify({ type: S.ent.type, entries: S.ent.entries })); else localStorage.removeItem(draftKey()); } catch (e) { } }
+    function clearDraft(no) { try { localStorage.removeItem(draftKey(no)); } catch (e) { } }
+    function loadDraft(no) {
       try {
-        var d = JSON.parse(localStorage.getItem(draftKey()) || 'null');
+        var d = JSON.parse(localStorage.getItem(draftKey(no)) || 'null');
         if (d && d.entries && d.entries.length) { d.entries.forEach(function (e) { e.k = ++uid; e.errs = []; }); return { type: d.type || 'regular', entries: d.entries, saved: [], busy: false }; }
       } catch (e) { }
       return null;
@@ -637,35 +646,71 @@
     function cellInput(ei, li, f, v, extra) {
       return '<input data-e="' + ei + '" data-l="' + li + '" data-f="' + f + '" value="' + esc(v) + '"' + (extra || '') + ' autocomplete="off">';
     }
+    function canRev() { return S.company.role === 'admin' || S.company.role === 'accountant'; }
+    var TYPE_AR = { regular: 'عادي', opening: 'افتتاحي', reversal: 'عكسي', closing: 'إقفال', adjustment: 'تسوية' };
+    function savedBody(en) {
+      var ls = en.lines, n = ls.length, rv = S.pg.reversed[en.id];
+      var h = '<tbody class="saved' + (S.hl === en.id ? ' hl' : '') + '" data-entry="' + esc(en.id) + '">';
+      ls.forEach(function (l, i) {
+        h += '<tr' + (i === 0 ? ' class="first"' : '') + '>';
+        if (i === 0) {
+          h += '<td rowspan="' + n + '" class="en"><div class="en-n">' + esc(en.fiscal_year + '/' + en.entry_no) + '</div>' +
+            (en.entry_type !== 'regular' ? '<div class="chip">' + esc(TYPE_AR[en.entry_type] || en.entry_type) + '</div>' : '') +
+            (rv ? '<div class="chip w">معكوس</div>' : '') + (en.in_manara ? '<div class="chip g">منارة' + (en.manara_no ? ' ' + esc(en.manara_no) : '') + '</div>' : '') +
+            (canRev() && en.entry_type !== 'reversal' && !rv ? '<div><button class="sm" data-act="erev" data-id="' + esc(en.id) + '">عكس</button></div>' : '') + '</td>' +
+            '<td rowspan="' + n + '" class="ed ro">' + esc(en.entry_date) + '</td>';
+        }
+        h += '<td class="ro">' + esc(l.account_code + ' ' + l.account_name) + '</td><td class="ro">' + esc(l.party_name || l.payee_name || '') + '</td><td class="ro">' + esc(l.project_code || '') + '</td><td class="ro">' + esc(l.cost_center_code || '') + '</td>' +
+          '<td class="ro num">' + (Number(l.debit) ? fmt(l.debit) : '') + '</td><td class="ro num">' + (Number(l.credit) ? fmt(l.credit) : '') + '</td>';
+        if (i === 0) h += '<td rowspan="' + n + '" class="edesc ro">' + esc(en.description) + '</td>';
+        h += '<td class="ops"></td></tr>';
+      });
+      return h + '</tbody>';
+    }
+    function pageBar() {
+      var ns = pageNos(), cur = S.cur, f = navNo('first'), p = navNo('prev'), n = navNo('next'), l = navNo('last');
+      function b(act, txt, dis) { return '<button class="sm" data-act="' + act + '"' + (dis ? ' disabled' : '') + '>' + txt + '</button>'; }
+      return '<div class="pagebar"><strong>قيد رقم</strong>' +
+        b('pg-first', '⇥ الأول', f === null || f === cur) + b('pg-prev', '→ السابق', p === null) +
+        '<input id="pgno" class="pgno" inputmode="numeric" dir="ltr" value="' + (cur === null ? '' : esc(cur)) + '" placeholder="جديد" title="اكتب رقم القيد واضغط Enter">' +
+        '<span class="mut">من ' + (ns.length ? ns[ns.length - 1] : 0) + (cur === null ? ' · صفحة جديدة، ستأخذ الرقم ' + ((ns.length ? ns[ns.length - 1] : 0) + 1) + ' عند أول حفظ' : '') + '</span>' +
+        b('pg-next', 'التالي ←', n === null) + b('pg-last', 'الأخير ⇤', l === null || l === cur) +
+        b('pg-new', '+ صفحة جديدة', cur === null) +
+        '<span class="sp"></span><input id="entsearch" class="entsearch" dir="ltr" placeholder="بحث برقم القيد: 37 أو 2026/37" title="اكتب رقم القيد واضغط Enter">' +
+        b('pg-print', 'طباعة', false) + b('pg-csv', 'CSV', !S.pg.entries.length) + '</div>';
+    }
     function viewEntry(focus) {
       var Sh = S.ent;
       if (S.company.role === 'viewer') { rootEl.innerHTML = topbar() + '<div class="wrap"><div class="empty">صلاحيتك عرض فقط.</div></div>'; return; }
-      var canType = S.company.role === 'admin' || S.company.role === 'accountant', st = sheetStats();
-      var kinds = ['any', 'customer', 'supplier', 'employee', 'partner'];
+      var canType = canRev(), kinds = ['any', 'customer', 'supplier', 'employee', 'partner'];
       var h = topbar() + '<div class="wrap wide" data-sheet><datalist id="acclist">' + accIdx().list.map(function (a) { return '<option value="' + esc(a.code + ' ' + a.name) + '">'; }).join('') + '</datalist>' +
         kinds.map(function (k) { return '<datalist id="pl_' + k + '">' + S.parties.filter(function (p) { return k === 'any' || p.kind === k; }).map(function (p) { return '<option value="' + esc(p.name) + '">'; }).join('') + '</datalist>'; }).join('') +
         '<datalist id="projlist">' + actProjects().map(function (p) { return '<option value="' + esc(p.code + ' ' + p.name) + '">'; }).join('') + '</datalist>' +
         '<datalist id="cclist">' + actCCs().map(function (p) { return '<option value="' + esc(p.code + ' ' + p.name) + '">'; }).join('') + '</datalist>';
-      h += '<div class="sheetbar"><strong>ورقة القيود</strong>' +
+      h += pageBar();
+      if (S.err) h += '<div class="err">' + esc(S.err) + '</div>';
+      h += '<div class="sheetbar"><strong>إدخال قيود جديدة</strong>' +
         (canType ? '<select name="sheettype" style="width:auto"><option value="regular">قيود عادية</option><option value="opening"' + (Sh.type === 'opening' ? ' selected' : '') + '>قيود افتتاحية</option><option value="adjustment"' + (Sh.type === 'adjustment' ? ' selected' : '') + '>قيود تسوية</option></select>' : '') +
         '<span id="sh-stats" class="chip"></span><span class="sp"></span>' +
-        '<button class="sm" data-act="sh-addentry">+ قيد جديد</button><button class="sm" data-act="sh-clear">تفريغ الورقة</button>' +
-        '<button class="pri" data-act="sh-save" id="sh-save"' + (Sh.busy ? ' disabled' : '') + '>' + (Sh.busy ? 'جارٍ الحفظ…' : 'حفظ كل القيود') + '</button></div>';
-      if (Sh.saved.length) {
-        h += '<div class="okbox"><button class="sm" style="float:left" data-act="sh-hidelog">إخفاء</button><strong>تم حفظ ' + Sh.saved.length + ' قيد:</strong> ' +
-          Sh.saved.map(function (x) { return '<span class="chip g">' + esc(x.no) + '</span>'; }).join('') +
-          Sh.saved.filter(function (x) { return x.warns && x.warns.length; }).map(function (x) { return '<div class="mut">⚠ ' + esc(x.no) + ': ' + esc(x.warns.join('؛ ')) + '</div>'; }).join('') + '</div>';
+        '<button class="sm" data-act="sh-addentry">+ قيد جديد</button><button class="sm" data-act="sh-clear">تفريغ الجديد</button>' +
+        '<button class="pri" data-act="sh-save" id="sh-save"' + (Sh.busy ? ' disabled' : '') + '>' + (Sh.busy ? 'جارٍ الحفظ…' : 'حفظ القيود الجديدة') + '</button></div>';
+      if (Sh.saved.length || Sh.note) {
+        h += '<div class="okbox"><button class="sm" style="float:left" data-act="sh-hidelog">إخفاء</button>' +
+          (Sh.saved.length ? '<strong>تم حفظ ' + Sh.saved.length + ' قيد:</strong> ' + Sh.saved.map(function (x) { return '<span class="chip g">' + esc(x.no) + '</span>'; }).join('') : '') +
+          Sh.saved.filter(function (x) { return x.warns && x.warns.length; }).map(function (x) { return '<div class="mut">⚠ ' + esc(x.no) + ': ' + esc(x.warns.join('؛ ')) + '</div>'; }).join('') +
+          (Sh.note ? '<div class="mut">⚠ ' + esc(Sh.note) + '</div>' : '') + '</div>';
       }
       h += '<div class="sheetwrap"><table class="sheet"><thead><tr><th>القيد</th><th>التاريخ</th><th>الحساب</th><th>الطرف</th><th>المشروع</th><th>مركز التكلفة</th><th>مدين</th><th>دائن</th><th>البيان</th><th></th></tr></thead>';
+      S.pg.entries.forEach(function (en) { h += savedBody(en); });
       Sh.entries.forEach(function (e, ei) {
         var n = e.lines.length;
-        h += '<tbody>';
+        h += '<tbody class="draft">';
         e.lines.forEach(function (l, li) {
           var a = resolveAcc(l.acc), pd = !a || a.party_rule === 'forbidden', jd = !a || a.project_rule === 'forbidden', cd = !a || a.cost_center_rule === 'forbidden';
           var pOk = !l.party || resolveParty(l.party, a), jOk = !l.project || resolveCode(S.projects, l.project), cOk = !l.cc || resolveCode(S.ccs, l.cc);
           h += '<tr' + (li === 0 ? ' class="first"' : '') + '>';
           if (li === 0) {
-            h += '<td rowspan="' + n + '" class="en"><div class="en-n">قيد ' + (ei + 1) + '</div>' + badge(e) +
+            h += '<td rowspan="' + n + '" class="en"><div class="en-n">جديد</div>' + badge(e) +
               '<div><button class="sm danger" data-act="sh-delentry" data-id="' + ei + '" title="حذف القيد من الورقة">✕</button></div>' +
               (e.errs.length ? '<ul class="eerr">' + e.errs.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' : '') + '</td>' +
               '<td rowspan="' + n + '" class="ed"><input type="date" data-e="' + ei + '" data-ef="date" value="' + esc(e.date) + '"></td>';
@@ -687,7 +732,7 @@
         });
         h += '</tbody>';
       });
-      h += '</table></div><p class="mut" style="font-size:.82rem">Enter ينقلك للخلية التالية، وعند آخر سطر في قيد غير متوازن يضيف سطرًا بالفرق تلقائيًا، وعند التوازن ينقلك للقيد التالي. المسودة تتحفظ تلقائيًا على هذا المتصفح.</p></div>';
+      h += '</table></div><p class="mut" style="font-size:.82rem">القيود المحفوظة (بالخلفية الخضراء) لا تُعدّل، وتصحيحها بزر «عكس». Enter ينقلك للخلية التالية، وعند آخر سطر في قيد غير متوازن يضيف سطرًا بالفرق تلقائيًا. المسودة (الجديد) تتحفظ تلقائيًا لكل صفحة على هذا المتصفح.</p></div>';
       rootEl.innerHTML = h;
       refreshSheet();
       if (focus) focusCell(focus);
@@ -704,7 +749,7 @@
       S.ent.entries.forEach(function (e) { var b = rootEl.querySelector('#eb-' + e.k); if (b) { b.outerHTML = badge(e); } });
     }
     function sheetInput(el) {
-      var Sh = S.ent, ei = el.getAttribute('data-e'), e = Sh.entries[+ei]; if (!e) return;
+      var Sh = S.ent, ei = el.getAttribute('data-e'); if (ei === null) return; var e = Sh.entries[+ei]; if (!e) return;
       var ef = el.getAttribute('data-ef');
       if (ef) { if (ef !== 'in_manara') e[ef] = el.value; saveDraft(); return; }
       var l = e.lines[+el.getAttribute('data-l')], f = el.getAttribute('data-f'); if (!l) return;
@@ -773,6 +818,7 @@
     function sheetChange(el) {
       var Sh = S.ent;
       if (el.name === 'sheettype') { Sh.type = el.value; return saveDraft(); }
+      if (el.getAttribute('data-e') === null) return;
       var ei = +el.getAttribute('data-e'), e = Sh.entries[ei]; if (!e) return;
       var ef = el.getAttribute('data-ef');
       if (ef) { if (ef === 'in_manara') { e.in_manara = el.checked; if (!el.checked) e.manara_no = ''; saveDraft(); return viewEntry({ e: ei, ef: ef }); } e[ef] = el.value; return saveDraft(); }
@@ -817,62 +863,247 @@
       var Sh = S.ent; if (Sh.busy) return;
       var list = Sh.entries.filter(entryUsed), bad = 0, res = [];
       Sh.entries.forEach(function (e) { e.errs = []; });
-      if (!list.length) return toast('الورقة فاضية');
+      if (!list.length) return toast('مفيش قيود جديدة للحفظ');
       list.forEach(function (e) { var v = validateOne(e); e.errs = v.errs; res.push(v); if (v.errs.length) bad++; });
       if (bad) { viewEntry(); toast('فيه ' + bad + ' قيد محتاج تصحيح. لم يُحفظ شيء.'); var first = rootEl.querySelector('.eerr'); if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center' }); return; }
-      Sh.busy = true; Sh.saved = []; viewEntry();
-      var i = 0;
-      function done(stopped) {
+      Sh.busy = true; Sh.saved = []; Sh.note = ''; viewEntry();
+      var i = 0, pageId = S.pg.id, pageNo = S.pg.no, unlinked = [], oldCur = S.cur;
+      function ensurePage() {
+        if (pageId) return Promise.resolve();
+        return Promise.resolve(sb.rpc('create_entry_page', { p_company: S.company.id })).then(function (r) {
+          if (r.error) throw r.error; pageId = r.data.page_id; pageNo = r.data.page_no;
+        });
+      }
+      function finish(stopped) {
         Sh.busy = false;
+        if (unlinked.length) Sh.note = 'قيود اتحفظت لكن ما اتربطتش بصفحة (تلاقيها في سجل القيود): ' + unlinked.join('، ');
+        var movedPage = pageNo && pageNo !== oldCur;
+        if (movedPage) { clearDraft(oldCur); S.cur = pageNo; }
         if (!Sh.entries.length) Sh.entries.push(blankEntry());
-        if (Sh.entries.every(function (x) { return !entryUsed(x); })) clearDraft(); else saveDraft();
-        viewEntry(); toast(stopped ? 'توقف الحفظ عند قيد فيه خطأ. اللي قبله اتحفظ.' : 'تم حفظ ' + Sh.saved.length + ' قيد');
+        saveDraft();
+        var p = pageId ? loadPages().then(function () { return loadPageContent(S.cur); }) : Promise.resolve();
+        return p.then(function () { viewEntry(); toast(stopped ? 'توقف الحفظ عند قيد فيه خطأ. اللي قبله اتحفظ.' : 'تم حفظ ' + Sh.saved.length + ' قيد في قيد رقم ' + pageNo); },
+          function (e) { fail(e); viewEntry(); });
       }
       function next() {
-        if (i >= list.length) return done(false);
+        if (i >= list.length) return finish(false);
         var e = list[i];
         var payload = { company_id: S.company.id, entry_date: e.date, description: String(e.desc).trim(), entry_type: Sh.type, voucher_type: 'journal',
           in_manara: !!e.in_manara, manara_no: e.in_manara ? (String(e.manara_no).trim() || null) : null, lines: res[i].lines };
         return Promise.resolve(sb.rpc('post_entry', { p: payload })).then(function (r) {
-          if (r.error) { e.errs = [R.translateDbError(r.error)]; return done(true); }
-          var d = r.data || {};
-          Sh.saved.push({ no: d.fiscal_year + '/' + d.entry_no, warns: d.warnings || [] });
+          if (r.error) { e.errs = [R.translateDbError(r.error)]; return finish(true); }
+          var d = r.data || {}, no = d.fiscal_year + '/' + d.entry_no;
+          Sh.saved.push({ no: no, warns: d.warnings || [] });
           Sh.entries = Sh.entries.filter(function (x) { return x.k !== e.k; });
-          i++; return next();
-        }, function (er) { e.errs = [R.translateDbError(er)]; return done(true); });
+          i++;
+          return ensurePage().then(function () { return sb.rpc('add_page_entry', { p_page: pageId, p_entry: d.entry_id }); })
+            .then(function (r2) { if (r2 && r2.error) unlinked.push(no); }, function () { unlinked.push(no); })
+            .then(next);
+        }, function (er) { e.errs = [R.translateDbError(er)]; return finish(true); });
       }
       return next();
     }
 
-    /* ---------- سجل القيود ---------- */
+    /* ---------- صفحات القيد: التنقل والاسترجاع ---------- */
+    function pageNos() { return S.pages.map(function (p) { return p.page_no; }).sort(function (a, b) { return a - b; }); }
+    function loadPages() {
+      return sb.from('entry_pages').select('id,page_no').eq('company_id', S.company.id).order('page_no').then(function (r) {
+        if (r.error) throw r.error; S.pages = r.data || [];
+      });
+    }
+    function emptyPg() { return { id: null, no: null, entries: [], reversed: {} }; }
+    function loadPageContent(no) {
+      S.pg = emptyPg();
+      if (no === null || no === undefined) return Promise.resolve();
+      var pg = S.pages.filter(function (x) { return x.page_no === no; })[0];
+      if (!pg) { S.cur = null; return Promise.resolve(); }
+      S.pg.id = pg.id; S.pg.no = no;
+      return sb.from('entry_page_items').select('entry_id,seq').eq('page_id', pg.id).order('seq').then(function (r) {
+        if (r.error) throw r.error;
+        var items = r.data || []; if (!items.length) return;
+        var ids = items.map(function (x) { return x.entry_id; });
+        return Promise.all([
+          sb.from('journal_entries').select('*').in('id', ids),
+          sb.from('v_ledger').select('*').in('entry_id', ids).order('line_no'),
+          sb.from('journal_entries').select('reverses_entry_id').in('reverses_entry_id', ids)
+        ]).then(function (rs) {
+          rs.forEach(function (x) { if (x.error) throw x.error; });
+          var em = {}; (rs[0].data || []).forEach(function (e) { e.lines = []; em[e.id] = e; });
+          (rs[1].data || []).forEach(function (l) { if (em[l.entry_id]) em[l.entry_id].lines.push(l); });
+          (rs[2].data || []).forEach(function (x) { S.pg.reversed[x.reverses_entry_id] = true; });
+          S.pg.entries = items.map(function (it) { return em[it.entry_id]; }).filter(function (e) { return e && e.lines.length; });
+        });
+      });
+    }
+    function openPage(no, hl) {
+      S.cur = (no === undefined ? null : no); S.hl = hl || null; S.err = '';
+      S.ent = loadDraft(S.cur) || newSheet();
+      return loadPageContent(S.cur).then(function () { S.ent = S.cur === null && S.ent ? S.ent : (S.ent || newSheet()); viewEntry(); scrollHl(); }, function (e) { fail(e); viewEntry(); });
+    }
+    function scrollHl() {
+      if (!S.hl) return;
+      var el = rootEl.querySelector('tbody.hl'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+      var id = S.hl; setTimeout(function () { if (S.hl === id) { S.hl = null; var x = rootEl.querySelector('tbody.hl'); if (x) x.classList.remove('hl'); } }, 3500);
+    }
+    function navNo(dir) {
+      var ns = pageNos(), cur = S.cur, last = ns.length ? ns[ns.length - 1] : null;
+      if (dir === 'first') return ns.length ? ns[0] : null;
+      if (dir === 'last') return last;
+      if (dir === 'prev') { if (cur === null) return last; var p = ns.filter(function (n) { return n < cur; }); return p.length ? p[p.length - 1] : null; }
+      if (dir === 'next') { if (cur === null) return null; var q = ns.filter(function (n) { return n > cur; }); return q.length ? q[0] : 'new'; }
+      return null;
+    }
+    function navTo(dir) { var n = navNo(dir); if (n === null) return; return openPage(n === 'new' ? null : n); }
+    function jumpPage(txt) {
+      txt = normNum(txt).trim(); if (!txt) return openPage(null);
+      var n = parseInt(txt, 10);
+      if (!/^\d+$/.test(txt) || !S.pages.some(function (p) { return p.page_no === n; })) { toast('لا توجد صفحة بالرقم ' + txt); var i = $('#pgno'); if (i) i.value = S.cur === null ? '' : S.cur; return; }
+      return openPage(n);
+    }
+    function parseEntryNo(txt) {
+      var m = normNum(txt).trim().match(/^(?:(\d{4})[\/\-])?(\d+)$/);
+      return m ? { fy: m[1] ? +m[1] : null, no: +m[2] } : null;
+    }
+    function findEntry(txt) {
+      var pe = parseEntryNo(txt); if (!txt.trim()) return;
+      if (!pe) return toast('اكتب رقم القيد مثل 37 أو 2026/37');
+      var q = sb.from('journal_entries').select('id,fiscal_year,entry_no').eq('company_id', S.company.id).eq('entry_no', pe.no);
+      if (pe.fy) q = q.eq('fiscal_year', pe.fy);
+      return q.order('fiscal_year', { ascending: false }).limit(1).then(function (r) {
+        if (r.error) { fail(r.error); return viewEntry(); }
+        var e = (r.data || [])[0]; if (!e) return toast('لا يوجد قيد بهذا الرقم');
+        return sb.from('entry_page_items').select('page_id').eq('entry_id', e.id).then(function (r2) {
+          var it = (r2.data || [])[0], pg = it && S.pages.filter(function (x) { return x.id === it.page_id; })[0];
+          if (pg) return openPage(pg.page_no, e.id);
+          regInit(); S.reg.f = blankRegF(); S.reg.f.no = e.fiscal_year + '/' + e.entry_no; S.reg.p = 0;
+          toast('القيد ده مش داخل صفحة، فتحته في سجل القيود'); return go('entries');
+        });
+      });
+    }
+    function csvCell(v) { v = String(v === null || v === undefined ? '' : v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+    function entriesCsv(entries) {
+      var rows = [['رقم القيد', 'التاريخ', 'النوع', 'الحساب', 'الطرف', 'المشروع', 'مركز التكلفة', 'مدين', 'دائن', 'البيان', 'رقم المنارة']];
+      entries.forEach(function (e) {
+        (e.lines || []).forEach(function (l) {
+          rows.push([e.fiscal_year + '/' + e.entry_no, e.entry_date, TYPE_AR[e.entry_type] || e.entry_type, l.account_code + ' ' + l.account_name, l.party_name || l.payee_name || '',
+            l.project_code || '', l.cost_center_code || '', Number(l.debit) || '', Number(l.credit) || '', e.description, e.manara_no || '']);
+        });
+      });
+      return '﻿' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
+    }
+    function download(name, text) {
+      try {
+        var b = new root.Blob([text], { type: 'text/csv;charset=utf-8' }), a = doc.createElement('a');
+        a.href = root.URL.createObjectURL(b); a.download = name; doc.body.appendChild(a); a.click();
+        setTimeout(function () { try { root.URL.revokeObjectURL(a.href); a.remove(); } catch (e) { } }, 500);
+      } catch (e) { toast('تعذّر التنزيل'); }
+    }
+
+    /* ---------- سجل القيود (بحث وفلترة) ---------- */
+    var PAGE_SZ = 50, ID_CAP = 250;
+    function blankRegF() { return { no: '', page: '', from: '', to: '', type: '', text: '', acc: '', party: '', project: '', amount: '' }; }
+    function regInit() { if (!S.reg) S.reg = { f: blankRegF(), p: 0, sort: 'desc', rows: [], count: 0, lines: {}, pageOf: {}, reversed: {}, open: {}, note: '' }; }
+    function uniq(a) { var m = {}, o = []; a.forEach(function (x) { if (!m[x]) { m[x] = 1; o.push(x); } }); return o; }
+    function runRegister() {
+      var G = S.reg, f = G.f, cid = S.company.id; G.note = '';
+      function empty() { G.rows = []; G.count = 0; G.lines = {}; G.pageOf = {}; G.reversed = {}; }
+      var accO = f.acc.trim() ? resolveAcc(f.acc) : null, partyO = f.party.trim() ? S.parties.filter(function (p) { return p.name === f.party.trim(); })[0] : null,
+        projO = f.project.trim() ? resolveCode(S.projects, f.project) : null, amt = f.amount.trim() ? pnum(f.amount) : 0;
+      if (f.acc.trim() && !accO) { empty(); G.note = 'الحساب غير موجود. اختر من القائمة.'; return Promise.resolve(); }
+      if (f.party.trim() && !partyO) { empty(); G.note = 'الطرف غير موجود. اختر من القائمة.'; return Promise.resolve(); }
+      if (f.project.trim() && !projO) { empty(); G.note = 'المشروع غير موجود. اختر من القائمة.'; return Promise.resolve(); }
+      if (f.amount.trim() && !(amt > 0)) { empty(); G.note = 'المبلغ غير صحيح.'; return Promise.resolve(); }
+      var pe = f.no.trim() ? parseEntryNo(f.no) : null;
+      if (f.no.trim() && !pe) { empty(); G.note = 'رقم القيد مثل 37 أو 2026/37.'; return Promise.resolve(); }
+      var needLines = accO || partyO || projO || amt;
+      var pLines = !needLines ? Promise.resolve(null) : (function () {
+        var q = sb.from('v_ledger').select('entry_id').eq('company_id', cid);
+        if (accO) q = q.eq('account_id', accO.id); if (partyO) q = q.eq('party_id', partyO.id); if (projO) q = q.eq('project_id', projO.id);
+        if (amt) q = q.or('debit.eq.' + amt + ',credit.eq.' + amt);
+        return q.limit(3000).then(function (r) { if (r.error) throw r.error; return uniq((r.data || []).map(function (x) { return x.entry_id; })); });
+      })();
+      var pPage = !f.page.trim() ? Promise.resolve(null) : (function () {
+        var no = parseInt(normNum(f.page), 10), pg = S.pages.filter(function (x) { return x.page_no === no; })[0];
+        if (!pg) return Promise.resolve([]);
+        return sb.from('entry_page_items').select('entry_id').eq('page_id', pg.id).then(function (r) { if (r.error) throw r.error; return (r.data || []).map(function (x) { return x.entry_id; }); });
+      })();
+      return Promise.all([pLines, pPage]).then(function (a) {
+        var ids = a[0] && a[1] ? a[0].filter(function (x) { return a[1].indexOf(x) >= 0; }) : (a[0] || a[1]);
+        if (ids && !ids.length) return empty();
+        if (ids && ids.length > ID_CAP) { ids = ids.slice(0, ID_CAP); G.note = 'النتائج كثيرة جدًا؛ عرضنا أول ' + ID_CAP + ' فقط. ضيّق البحث (تاريخ أو رقم).'; }
+        var q = sb.from('journal_entries').select('*', { count: 'exact' }).eq('company_id', cid);
+        if (ids) q = q.in('id', ids);
+        if (pe) { if (pe.fy) q = q.eq('fiscal_year', pe.fy); q = q.eq('entry_no', pe.no); }
+        if (f.from) q = q.gte('entry_date', f.from); if (f.to) q = q.lte('entry_date', f.to);
+        if (f.type) q = q.eq('entry_type', f.type);
+        if (f.text.trim()) q = q.ilike('description', '%' + f.text.trim().replace(/[%,()*\\]/g, ' ') + '%');
+        var asc = G.sort === 'asc';
+        q = q.order('fiscal_year', { ascending: asc }).order('entry_no', { ascending: asc }).range(G.p * PAGE_SZ, G.p * PAGE_SZ + PAGE_SZ - 1);
+        return q.then(function (r) {
+          if (r.error) throw r.error;
+          G.rows = r.data || []; G.count = (r.count === null || r.count === undefined) ? G.rows.length : r.count;
+          G.lines = {}; G.pageOf = {}; G.reversed = {};
+          var eids = G.rows.map(function (x) { return x.id; }); if (!eids.length) return;
+          return Promise.all([
+            sb.from('v_ledger').select('*').in('entry_id', eids).order('line_no'),
+            sb.from('entry_page_items').select('entry_id,page_id').in('entry_id', eids),
+            sb.from('journal_entries').select('reverses_entry_id').in('reverses_entry_id', eids)
+          ]).then(function (rs) {
+            rs.forEach(function (x) { if (x.error) throw x.error; });
+            (rs[0].data || []).forEach(function (l) { (G.lines[l.entry_id] = G.lines[l.entry_id] || []).push(l); });
+            var pn = {}; S.pages.forEach(function (p) { pn[p.id] = p.page_no; });
+            (rs[1].data || []).forEach(function (x) { G.pageOf[x.entry_id] = pn[x.page_id]; });
+            (rs[2].data || []).forEach(function (x) { G.reversed[x.reverses_entry_id] = true; });
+          });
+        });
+      });
+    }
+    function regTotal(id) { var t = 0; (S.reg.lines[id] || []).forEach(function (l) { t += Number(l.debit) || 0; }); return t; }
     function viewEntries() {
-      var q = S.q.trim().toLowerCase(), w = S.company.role === 'admin' || S.company.role === 'accountant';
-      var reversed = {}; S.entries.forEach(function (e) { if (e.reverses_entry_id) reversed[e.reverses_entry_id] = true; });
-      var TL = { regular: 'عادي', opening: 'افتتاحي', reversal: 'عكسي', closing: 'إقفال', adjustment: 'تسوية' };
-      var rows = S.entries.filter(function (e) { return !q || (e.fiscal_year + '/' + e.entry_no + ' ' + e.description + ' ' + e.entry_date).toLowerCase().indexOf(q) >= 0; });
-      var h = topbar() + '<div class="wrap"><div class="bar"><h2 style="margin:0">سجل القيود</h2><span class="sp"></span><input type="search" id="q" placeholder="بحث بالرقم أو البيان" value="' + esc(S.q) + '"></div>';
+      var G = S.reg, f = G.f, pages = Math.max(1, Math.ceil(G.count / PAGE_SZ));
+      function inp(n, label, extra) { return '<div><label>' + label + '</label><input name="' + n + '" value="' + esc(f[n]) + '"' + (extra || '') + '></div>'; }
+      var h = topbar() + '<div class="wrap wide"><datalist id="acclist">' + accIdx().list.map(function (a) { return '<option value="' + esc(a.code + ' ' + a.name) + '">'; }).join('') + '</datalist>' +
+        '<datalist id="pl_any">' + S.parties.map(function (p) { return '<option value="' + esc(p.name) + '">'; }).join('') + '</datalist>' +
+        '<datalist id="projlist">' + S.projects.map(function (p) { return '<option value="' + esc(p.code + ' ' + p.name) + '">'; }).join('') + '</datalist>' +
+        '<h2>سجل القيود</h2><form data-form="regf" class="card"><div class="g5">' +
+        inp('no', 'رقم القيد', ' dir="ltr" placeholder="37 أو 2026/37"') + inp('page', 'رقم صفحة القيد', ' dir="ltr" inputmode="numeric"') +
+        '<div><label>من تاريخ</label><input type="date" name="from" value="' + esc(f.from) + '"></div><div><label>إلى تاريخ</label><input type="date" name="to" value="' + esc(f.to) + '"></div>' +
+        '<div><label>النوع</label><select name="type"><option value="">الكل</option>' + Object.keys(TYPE_AR).map(function (k) { return '<option value="' + k + '"' + (f.type === k ? ' selected' : '') + '>' + TYPE_AR[k] + '</option>'; }).join('') + '</select></div>' +
+        inp('text', 'البيان يحتوي') + inp('acc', 'الحساب', ' list="acclist"') + inp('party', 'الطرف', ' list="pl_any"') + inp('project', 'المشروع', ' list="projlist"') + inp('amount', 'المبلغ (مدين أو دائن)', ' dir="ltr" inputmode="decimal"') +
+        '</div><div class="mf" style="justify-content:flex-start;align-items:center"><button class="pri" type="submit">بحث</button><button type="button" data-act="reg-clear">مسح</button>' +
+        '<select name="sort" style="width:auto"><option value="desc">الأحدث أولًا</option><option value="asc"' + (G.sort === 'asc' ? ' selected' : '') + '>الأقدم أولًا</option></select>' +
+        '<span class="sp"></span><button type="button" data-act="reg-csv"' + (G.rows.length ? '' : ' disabled') + '>تصدير النتائج CSV</button></div></form>';
       if (S.err) h += '<div class="err">' + esc(S.err) + '</div>';
-      h += '<div class="tree">' + (rows.length ? rows.map(function (e) {
-        var open = S.openE === e.id, ls = S.entLines[e.id];
-        var r = '<div class="row' + (reversed[e.id] ? ' off' : '') + '"><span class="tg" data-act="eopen" data-id="' + esc(e.id) + '">' + (open ? '▾' : '◂') + '</span>' +
-          '<span class="code">' + esc(e.fiscal_year + '/' + e.entry_no) + '</span><span class="code" style="min-width:6.5rem">' + esc(e.entry_date) + '</span>' +
-          '<span class="nm">' + esc(e.description) + (e.entry_type !== 'regular' ? '<span class="chip">' + esc(TL[e.entry_type] || e.entry_type) + '</span>' : '') +
-          (reversed[e.id] ? '<span class="chip w">معكوس</span>' : '') + (e.in_manara ? '<span class="chip g">منارة' + (e.manara_no ? ' ' + esc(e.manara_no) : '') + '</span>' : '') + '</span>' +
-          (w && e.entry_type !== 'reversal' && !reversed[e.id] ? '<span class="act"><button class="sm" data-act="erev" data-id="' + esc(e.id) + '">عكس</button></span>' : '') + '</div>';
+      if (G.note) h += '<div class="errs" style="color:var(--warn);border-color:var(--warn)">' + esc(G.note) + '</div>';
+      h += '<p class="mut">' + G.count + ' قيد' + (G.count > PAGE_SZ ? ' · صفحة ' + (G.p + 1) + ' من ' + pages : '') + '</p>';
+      h += '<div class="sheetwrap"><table class="reg"><thead><tr><th></th><th>رقم القيد</th><th>التاريخ</th><th>البيان</th><th>النوع</th><th>صفحة القيد</th><th>المبلغ</th><th></th></tr></thead><tbody>';
+      if (!G.rows.length) h += '<tr><td colspan="8" class="empty">لا توجد قيود مطابقة.</td></tr>';
+      G.rows.forEach(function (e) {
+        var open = G.open[e.id], rv = G.reversed[e.id], pg = G.pageOf[e.id];
+        h += '<tr class="' + (rv ? 'off' : '') + '"><td class="tg" data-act="eopen" data-id="' + esc(e.id) + '">' + (open ? '▾' : '◂') + '</td><td class="code">' + esc(e.fiscal_year + '/' + e.entry_no) + '</td><td class="code">' + esc(e.entry_date) + '</td>' +
+          '<td>' + esc(e.description) + (rv ? '<span class="chip w">معكوس</span>' : '') + (e.in_manara ? '<span class="chip g">منارة' + (e.manara_no ? ' ' + esc(e.manara_no) : '') + '</span>' : '') + '</td>' +
+          '<td>' + (e.entry_type !== 'regular' ? '<span class="chip">' + esc(TYPE_AR[e.entry_type] || e.entry_type) + '</span>' : '') + '</td>' +
+          '<td>' + (pg ? '<button class="sm" data-act="reg-page" data-id="' + esc(pg) + '" data-e="' + esc(e.id) + '">قيد ' + esc(pg) + '</button>' : '<span class="mut">—</span>') + '</td>' +
+          '<td class="num">' + fmt(regTotal(e.id)) + '</td><td>' + (canRev() && e.entry_type !== 'reversal' && !rv ? '<button class="sm" data-act="erev" data-id="' + esc(e.id) + '">عكس</button>' : '') + '</td></tr>';
         if (open) {
-          r += '<div class="sub">' + (ls ? '<table class="lines"><thead><tr><th>الحساب</th><th>الطرف</th><th>مشروع</th><th>مركز</th><th>البيان</th><th>مدين</th><th>دائن</th></tr></thead><tbody>' +
-            ls.map(function (l) { return '<tr><td>' + esc(l.account_code + ' ' + l.account_name) + '</td><td>' + esc(l.party_name || l.payee_name || '') + '</td><td>' + esc(l.project_code || '') + '</td><td>' + esc(l.cost_center_code || '') + '</td><td>' + esc(l.line_description || '') + '</td><td class="num">' + (Number(l.debit) ? fmt(l.debit) : '') + '</td><td class="num">' + (Number(l.credit) ? fmt(l.credit) : '') + '</td></tr>'; }).join('') +
-            '</tbody></table>' : '<span class="mut">جارٍ التحميل…</span>') + '</div>';
+          h += '<tr class="subrow"><td colspan="8"><table class="lines"><thead><tr><th>الحساب</th><th>الطرف</th><th>مشروع</th><th>مركز</th><th>مدين</th><th>دائن</th></tr></thead><tbody>' +
+            (G.lines[e.id] || []).map(function (l) { return '<tr><td>' + esc(l.account_code + ' ' + l.account_name) + '</td><td>' + esc(l.party_name || l.payee_name || '') + '</td><td>' + esc(l.project_code || '') + '</td><td>' + esc(l.cost_center_code || '') + '</td><td class="num">' + (Number(l.debit) ? fmt(l.debit) : '') + '</td><td class="num">' + (Number(l.credit) ? fmt(l.credit) : '') + '</td></tr>'; }).join('') + '</tbody></table></td></tr>';
         }
-        return r;
-      }).join('') : '<div class="empty">لا توجد قيود.</div>') + '</div>' + (S.entries.length >= 300 ? '<p class="mut">يعرض آخر 300 قيد.</p>' : '') + '</div>';
-      rootEl.innerHTML = h;
+      });
+      h += '</tbody></table></div>';
+      if (G.count > PAGE_SZ) h += '<div class="bar" style="margin-top:.6rem"><button class="sm" data-act="reg-prev"' + (G.p === 0 ? ' disabled' : '') + '>→ السابق</button><span class="mut">صفحة ' + (G.p + 1) + ' من ' + pages + '</span><button class="sm" data-act="reg-next"' + (G.p + 1 >= pages ? ' disabled' : '') + '>التالي ←</button></div>';
+      rootEl.innerHTML = h + '</div>';
       if (S.rev) renderRev();
     }
+    function readRegF(form) {
+      var f = blankRegF(); Object.keys(f).forEach(function (k) { if (form.elements[k]) f[k] = String(form.elements[k].value).trim(); });
+      S.reg.f = f; S.reg.sort = form.elements.sort.value;
+    }
+    function entryById(id) { return S.pg.entries.concat(S.reg ? S.reg.rows : []).filter(function (x) { return x.id === id; })[0]; }
     function renderRev() {
-      var e = S.entries.filter(function (x) { return x.id === S.rev.id; })[0];
+      var e = entryById(S.rev.id); if (!e) { S.rev = null; return; }
       var h = '<div class="modal"><form class="card" data-form="rev"><h2>عكس القيد ' + esc(e.fiscal_year + '/' + e.entry_no) + '</h2>' +
-        '<p class="mut">بيتعمل قيد عكسي بنفس الأسطر، والقيد الأصلي يفضل كما هو.</p>' +
+        '<p class="mut">بيتعمل قيد عكسي بنفس الأسطر، والقيد الأصلي يفضل كما هو. القيد العكسي يتسجل في نفس صفحة القيد.</p>' +
         '<label>تاريخ القيد العكسي</label><input type="date" name="date" value="' + esc(S.rev.date) + '"><label>سبب العكس</label><input name="reason" value="' + esc(S.rev.reason) + '">' +
         (S.rev.err ? '<div class="errs"><ul><li>' + esc(S.rev.err) + '</li></ul></div>' : '') +
         '<div class="mf"><button type="button" data-act="revcancel">إلغاء</button><button class="pri" type="submit">عكس القيد</button></div></form></div>';
@@ -884,24 +1115,25 @@
       if (!date || !reason) { S.rev.err = 'التاريخ وسبب العكس مطلوبان'; return renderRev(); }
       return Promise.resolve(sb.rpc('reverse_entry', { p_entry: id, p_date: date, p_reason: reason })).then(function (r) {
         if (r.error) { S.rev.err = R.translateDbError(r.error); return renderRev(); }
-        S.rev = null; toast('تم عكس القيد'); return loadView().then(render);
+        var newId = r.data && r.data.entry_id;
+        return sb.from('entry_page_items').select('page_id').eq('entry_id', id).then(function (q) {
+          var it = (q.data || [])[0];
+          return (it && newId) ? sb.rpc('add_page_entry', { p_page: it.page_id, p_entry: newId }) : null;
+        }).then(function () { S.rev = null; toast('تم عكس القيد'); return loadView().then(render); },
+          function () { S.rev = null; toast('تم العكس (ولم يُربط بالصفحة)'); return loadView().then(render); });
       }, function (e) { S.rev.err = R.translateDbError(e); renderRev(); });
-    }
-    function openEntry(id) {
-      if (S.openE === id) { S.openE = null; return viewEntries(); }
-      S.openE = id; viewEntries();
-      if (S.entLines[id]) return;
-      return sb.from('v_ledger').select('*').eq('entry_id', id).order('line_no').then(function (r) {
-        if (r.error) { fail(r.error); return viewEntries(); }
-        S.entLines[id] = r.data || []; viewEntries();
-      });
     }
 
     rootEl.addEventListener('click', onClick);
     rootEl.addEventListener('change', onChange);
     rootEl.addEventListener('submit', onSubmit);
     rootEl.addEventListener('input', onInput);
-    rootEl.addEventListener('keydown', function (ev) { if (ev.target.closest && ev.target.closest('[data-sheet]')) sheetKey(ev); });
+    rootEl.addEventListener('keydown', function (ev) {
+      var el = ev.target;
+      if (ev.key === 'Enter' && el.id === 'pgno') { ev.preventDefault(); return jumpPage(el.value); }
+      if (ev.key === 'Enter' && el.id === 'entsearch') { ev.preventDefault(); return findEntry(el.value); }
+      if (el.closest && el.closest('[data-sheet]')) sheetKey(ev);
+    });
     return { start: start, state: S };
   }
 

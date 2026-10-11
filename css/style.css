@@ -82,3 +82,26 @@ table.sheet td.ops{white-space:nowrap;padding:.15rem;min-width:4.5rem}
 table.sheet input.num{text-align:end;font-variant-numeric:tabular-nums;min-width:7rem}
 .eerr{margin:.3rem 0 0;padding-inline-start:1rem;color:var(--err);font-size:.78rem;text-align:start}
 .okbox{background:color-mix(in srgb,var(--ok) 10%,transparent);border:1px solid var(--ok);border-radius:8px;padding:.5rem .8rem;margin-bottom:.6rem}
+.pagebar{display:flex;gap:.45rem;align-items:center;flex-wrap:wrap;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:.5rem .7rem;margin-bottom:.6rem}
+.pagebar .pgno{width:5.5rem;text-align:center;font-weight:700;font-size:1.05rem;padding:.3rem}
+.pagebar .entsearch{width:15rem}
+table.sheet tbody.saved td{background:color-mix(in srgb,var(--ok) 5%,var(--card))}
+table.sheet tbody.saved td.en{background:color-mix(in srgb,var(--ok) 12%,var(--chip))}
+table.sheet td.ro{padding:.4rem .5rem;white-space:normal;vertical-align:top}
+table.sheet td.edesc.ro{min-width:15rem}
+table.sheet tbody.hl td{background:color-mix(in srgb,var(--warn) 25%,var(--card));transition:background 1s}
+.g5{display:grid;grid-template-columns:repeat(5,1fr);gap:0 .8rem}
+@media(max-width:900px){.g5{grid-template-columns:repeat(2,1fr)}}
+table.reg{width:100%;border-collapse:collapse;font-size:.9rem}
+table.reg th{background:var(--chip);color:var(--mut);padding:.4rem .5rem;text-align:start;white-space:nowrap;border-bottom:1px solid var(--bd)}
+table.reg td{padding:.35rem .5rem;border-bottom:1px solid var(--bd);vertical-align:middle}
+table.reg tr.off td{opacity:.55}
+table.reg td.num{text-align:end;font-variant-numeric:tabular-nums;white-space:nowrap}
+table.reg tr.subrow td{background:var(--bg);padding:.4rem 1rem .8rem}
+@media print{
+  .top,.pagebar,.sheetbar,.okbox,.ops,.toast,.mut,.err,tbody.draft,button{display:none!important}
+  body{background:#fff;color:#000}
+  .wrap.wide{padding:0}
+  .sheetwrap{border:0;overflow:visible}
+  table.sheet th{position:static}
+}
