@@ -35,7 +35,8 @@
 
   function create(sb, rootEl, doc) {
     doc = doc || root.document;
-    var S = { user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
+    var NAV = [['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
+    var S = { view: 'accounts', rows: [], roleMap: {}, gform: null, user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
 
     function $(sel) { return rootEl.querySelector(sel); }
     function toast(msg) {
@@ -55,6 +56,7 @@
       return '<div class="top"><h1>نظام الحسابات</h1>' +
         (S.company ? '<span class="chip">' + esc(S.company.name) + '</span><span class="chip">' + esc(S.company.role === 'admin' ? 'مدير' : S.company.role === 'accountant' ? 'محاسب' : S.company.role === 'entry' ? 'مدخل بيانات' : 'مشاهدة') + '</span>' : '') +
         '<span class="sp"></span>' +
+        (S.company ? NAV.map(function (n) { return '<button class="sm' + (S.view === n[0] ? ' pri' : '') + '" data-act="nav" data-id="' + n[0] + '">' + n[1] + '</button>'; }).join('') : '') +
         (S.company ? '<button data-act="switch" class="sm">تغيير الشركة</button>' : '') +
         '<button data-act="theme" class="sm" title="الوضع الداكن/الفاتح">◐</button>' +
         (S.user ? '<button data-act="logout" class="sm">خروج</button>' : '') + '</div>';
@@ -235,13 +237,44 @@
     function enterCompany(id) {
       S.company = S.companies.filter(function (c) { return c.id === id; })[0]; if (!S.company) return Promise.resolve();
       store('company', id); S.q = ''; S.form = null; S.err = '';
+      S.view = 'accounts';
       return loadAccounts().then(viewAccounts, function (e) { fail(e); viewAccounts(); });
     }
 
     function route() {
       if (!S.user) return viewLogin();
       if (!S.company) return viewCompanies();
-      return viewAccounts();
+      return render();
+    }
+    function render() {
+      return ({ accounts: viewAccounts, roles: viewRoles, projects: viewList, cost_centers: viewList, parties: viewList }[S.view] || viewAccounts)();
+    }
+    function go(v) {
+      S.view = v; S.q = ''; S.err = ''; S.form = null; S.gform = null;
+      return loadView().then(render, function (e) { fail(e); render(); });
+    }
+    function loadView() {
+      var id = S.company.id;
+      if (S.view === 'accounts') return loadAccounts();
+      if (S.view === 'roles') return Promise.all([loadAccounts(), sb.from('account_roles').select('role_code,account_id').eq('company_id', id)]).then(function (r) {
+        if (r[1].error) throw r[1].error;
+        S.roleMap = {}; (r[1].data || []).forEach(function (x) { S.roleMap[x.role_code] = x.account_id; });
+      });
+      if (S.view === 'projects' || S.view === 'cost_centers') return sb.from(S.view).select('*').eq('company_id', id).order('code').then(function (r) {
+        if (r.error) throw r.error; S.rows = r.data || [];
+      });
+      if (S.view === 'parties') return Promise.all([
+        sb.from('party_companies').select('party_id,manara_account_code,active,parties(*)').eq('company_id', id),
+        sb.from('parties').select('id,name,kind')
+      ]).then(function (r) {
+        if (r[0].error) throw r[0].error; if (r[1].error) throw r[1].error;
+        S.rows = (r[0].data || []).filter(function (x) { return x.parties; }).map(function (x) {
+          return Object.assign({}, x.parties, { manara_account_code: x.manara_account_code, pc_active: x.active });
+        }).sort(function (a, b) { return a.name.localeCompare(b.name, 'ar'); });
+        var linked = {}; S.rows.forEach(function (x) { linked[x.id] = true; });
+        S.unlinked = (r[1].data || []).filter(function (x) { return !linked[x.id]; });
+      });
+      return Promise.resolve();
     }
 
     function afterLogin(user) {
@@ -300,6 +333,10 @@
       var act = t.getAttribute('data-act'), id = t.getAttribute('data-id');
       if (act === 'theme') return theme();
       if (act === 'logout') return sb.auth.signOut().then(function () { S.user = null; S.company = null; store('company', ''); S.err = ''; route(); });
+      if (act === 'nav') return go(id);
+      if (act === 'gadd') return openG(null);
+      if (act === 'gedit') return openG(id);
+      if (act === 'gcancel') { S.gform = null; return render(); }
       if (act === 'switch') { S.company = null; S.form = null; store('company', ''); return route(); }
       if (act === 'reload') return loadCompanies().then(route, function (e) { fail(e); route(); });
       if (act === 'pick') return enterCompany(id);
@@ -338,6 +375,9 @@
       var form = ev.target, kind = form.getAttribute('data-form'); if (!kind) return;
       ev.preventDefault();
       if (kind === 'acc') return submitAccount(form);
+      if (kind === 'gen') return submitG(form);
+      if (kind === 'roles') return saveRoles(form);
+      if (kind === 'link') return linkParty(form);
       if (kind === 'login') {
         if (S.busy) return;
         var email = form.elements.email.value.trim(), pw = form.elements.password.value;
@@ -351,7 +391,169 @@
     }
 
     function onInput(ev) {
-      if (ev.target.id === 'q') { S.q = ev.target.value; var pos = ev.target.selectionStart; viewAccounts(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (e) { } } }
+      if (ev.target.id === 'q') { S.q = ev.target.value; var pos = ev.target.selectionStart; render(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (e) { } } }
+    }
+
+    /* ---------- ربط الأدوار ---------- */
+    var ROLES = [
+      ['ar_control', 'العملاء (رقابة)', function (a) { return a.is_control_account; }],
+      ['ap_control', 'الموردون (رقابة)', function (a) { return a.is_control_account; }],
+      ['cash', 'الصندوق', function (a) { return a.is_cash_account; }],
+      ['bank', 'البنك', function (a) { return a.is_cash_account; }],
+      ['custody', 'العهد', function (a) { return a.account_type === 'asset'; }],
+      ['vat_input', 'ضريبة المدخلات', function (a) { return a.vat_role === 'input'; }],
+      ['vat_output', 'ضريبة المخرجات', function (a) { return a.vat_role === 'output'; }],
+      ['vat_payable', 'ضريبة القيمة المضافة المستحقة', function (a) { return a.account_type === 'liability'; }],
+      ['payroll_payable', 'رواتب مستحقة', function (a) { return a.account_type === 'liability'; }],
+      ['customer_advance', 'فلوس واصلة من العميل (دفعات مقدمة)', function (a) { return a.is_advance_account; }],
+      ['supplier_advance_unregistered', 'دفعات مقدمة لغير المسجلين', function (a) { return a.is_advance_account; }],
+      ['depreciation_expense', 'مصروف الإهلاك', function (a) { return a.account_type === 'expense'; }],
+      ['accumulated_depreciation', 'مجمع الإهلاك', function (a) { return a.account_type === 'asset'; }]
+    ];
+    function viewRoles() {
+      var post = S.accounts.filter(function (a) { return a.is_postable && a.is_active; }).sort(natCmp);
+      var h = topbar() + '<div class="wrap"><h2>ربط الأدوار بالحسابات</h2><p class="mut">الأدوار دي بتستخدمها القوالب السريعة (فاتورة، سند صرف…) لتعرف تقيّد على أي حساب. الحسابات المقترحة بتظهر أولًا.</p>';
+      if (S.err) h += '<div class="err">' + esc(S.err) + '</div>';
+      h += '<form data-form="roles" class="card">';
+      ROLES.forEach(function (r) {
+        var cur = S.roleMap[r[0]] || '', sug = post.filter(r[2]), rest = post.filter(function (a) { return !r[2](a); });
+        function o(a) { return '<option value="' + esc(a.id) + '"' + (a.id === cur ? ' selected' : '') + '>' + esc(a.code + ' ' + a.name) + '</option>'; }
+        h += '<label>' + esc(r[1]) + '</label><select name="' + r[0] + '"' + (canWrite() ? '' : ' disabled') + '><option value="">— غير مربوط —</option>' +
+          (sug.length ? '<optgroup label="مقترحة">' + sug.map(o).join('') + '</optgroup>' : '') +
+          '<optgroup label="باقي الحسابات">' + rest.map(o).join('') + '</optgroup></select>';
+      });
+      if (canWrite()) h += '<div class="mf"><button class="pri" type="submit">حفظ الربط</button></div>';
+      rootEl.innerHTML = h + '</form></div>';
+    }
+    function saveRoles(form) {
+      var rows = [], clear = [];
+      ROLES.forEach(function (r) {
+        var v = form.elements[r[0]].value;
+        if (v) rows.push({ company_id: S.company.id, role_code: r[0], account_id: v }); else if (S.roleMap[r[0]]) clear.push(r[0]);
+      });
+      var ops = [];
+      if (rows.length) ops.push(sb.from('account_roles').upsert(rows, { onConflict: 'company_id,role_code' }));
+      clear.forEach(function (c) { ops.push(sb.from('account_roles').delete().eq('company_id', S.company.id).eq('role_code', c)); });
+      return Promise.all(ops).then(function (rs) {
+        var bad = rs.filter(function (x) { return x.error; })[0];
+        if (bad) { fail(bad.error); return viewRoles(); }
+        S.err = ''; toast('تم حفظ الربط'); return loadView().then(viewRoles);
+      }, function (e) { fail(e); viewRoles(); });
+    }
+
+    /* ---------- قوائم بسيطة: مشاريع / مراكز تكلفة / أطراف ---------- */
+    var PARTY_KIND = { customer: 'عميل', supplier: 'مورد', employee: 'موظف', partner: 'شريك' };
+    var CFG = {
+      projects: {
+        title: 'المشاريع', one: 'مشروع', table: 'projects',
+        fields: [
+          { k: 'code', l: 'الكود', req: 1, dir: 'ltr' }, { k: 'name', l: 'الاسم', req: 1 },
+          { k: 'status', l: 'الحالة', sel: { active: 'نشط', closed: 'مغلق' }, def: 'active' },
+          { k: 'budget_amount', l: 'الميزانية التقديرية (اختياري)', num: 1 }],
+        line: function (x) { return '<span class="chip' + (x.status === 'active' ? ' g' : '') + '">' + (x.status === 'active' ? 'نشط' : 'مغلق') + '</span>' + (x.budget_amount !== null && x.budget_amount !== undefined ? '<span class="chip">ميزانية ' + esc(Number(x.budget_amount).toLocaleString('en')) + '</span>' : ''); },
+        off: function (x) { return x.status === 'closed'; }
+      },
+      cost_centers: {
+        title: 'مراكز التكلفة', one: 'مركز تكلفة', table: 'cost_centers',
+        fields: [{ k: 'code', l: 'الكود', req: 1, dir: 'ltr' }, { k: 'name', l: 'الاسم', req: 1 }, { k: 'active', l: 'نشط', bool: 1, def: true }],
+        line: function (x) { return x.active ? '' : '<span class="chip w">معطّل</span>'; },
+        off: function (x) { return !x.active; }
+      },
+      parties: {
+        title: 'الأطراف (عملاء، موردون، موظفون، شركاء)', one: 'طرف', table: 'parties', shared: 1,
+        fields: [
+          { k: 'name', l: 'الاسم', req: 1 }, { k: 'kind', l: 'النوع', sel: PARTY_KIND, def: 'customer', req: 1 },
+          { k: 'vat_number', l: 'الرقم الضريبي (15 رقم، اختياري)', dir: 'ltr' }, { k: 'cr_number', l: 'السجل التجاري (اختياري)', dir: 'ltr' },
+          { k: 'address', l: 'العنوان (اختياري)' },
+          { k: 'manara_account_code', l: 'كود الطرف في المنارة (لهذه الشركة)', dir: 'ltr', pc: 1 },
+          { k: 'pc_active', l: 'نشط في هذه الشركة', bool: 1, def: true, pc: 1 }],
+        line: function (x) { return '<span class="chip">' + esc(PARTY_KIND[x.kind] || x.kind) + '</span>' + (x.vat_number ? '<span class="chip">ض ' + esc(x.vat_number) + '</span>' : '') + (x.manara_account_code ? '<span class="chip">منارة ' + esc(x.manara_account_code) + '</span>' : '') + (x.pc_active ? '' : '<span class="chip w">معطّل</span>'); },
+        off: function (x) { return !x.pc_active; }
+      }
+    };
+    function viewList() {
+      var c = CFG[S.view], q = S.q.trim().toLowerCase(), w = canWrite();
+      var rows = S.rows.filter(function (x) { return !q || ((x.code || '') + ' ' + x.name + ' ' + (x.vat_number || '')).toLowerCase().indexOf(q) >= 0; });
+      if (c.table !== 'parties') rows = rows.slice().sort(natCmp);
+      var h = topbar() + '<div class="wrap"><div class="bar"><h2 style="margin:0">' + esc(c.title) + '</h2><span class="sp"></span>' +
+        '<input type="search" id="q" placeholder="بحث" value="' + esc(S.q) + '">' + (w ? '<button class="pri" data-act="gadd">+ ' + esc(c.one) + ' جديد</button>' : '<span class="chip">عرض فقط</span>') + '</div>';
+      if (S.err) h += '<div class="err">' + esc(S.err) + '</div>';
+      if (c.shared && w && S.unlinked && S.unlinked.length) {
+        h += '<form data-form="link" class="bar"><select name="pid" style="max-width:320px"><option value="">ربط طرف موجود في شركة أخرى…</option>' +
+          S.unlinked.map(function (x) { return '<option value="' + esc(x.id) + '">' + esc(x.name + ' — ' + (PARTY_KIND[x.kind] || x.kind)) + '</option>'; }).join('') + '</select><button class="sm" type="submit">ربط</button></form>';
+      }
+      h += '<div class="tree">' + (rows.length ? rows.map(function (x) {
+        return '<div class="row' + (c.off(x) ? ' off' : '') + '">' + (x.code !== undefined ? '<span class="code">' + esc(x.code) + '</span>' : '') +
+          '<span class="nm">' + esc(x.name) + ' ' + c.line(x) + '</span>' +
+          (w ? '<span class="act"><button class="sm" data-act="gedit" data-id="' + esc(x.id) + '">تعديل</button></span>' : '') + '</div>';
+      }).join('') : '<div class="empty">لا يوجد بيانات بعد.</div>') + '</div></div>';
+      rootEl.innerHTML = h;
+      if (S.gform) renderGModal();
+    }
+    function renderGModal() {
+      var c = CFG[S.view], f = S.gform, h = '<div class="modal"><form class="card" data-form="gen"><h2>' + (f.id ? 'تعديل ' : 'جديد: ') + esc(c.one) + '</h2>';
+      if (c.shared && f.id) h += '<div class="mut" style="font-size:.85rem">بيانات الاسم والنوع والرقم الضريبي مشتركة بين الشركات.</div>';
+      c.fields.forEach(function (fd) {
+        var v = f.data[fd.k];
+        if (fd.bool) h += '<div class="chk"><input type="checkbox" name="' + fd.k + '" id="g_' + fd.k + '"' + (v ? ' checked' : '') + '><label for="g_' + fd.k + '" style="margin:0">' + esc(fd.l) + '</label></div>';
+        else if (fd.sel) h += '<label>' + esc(fd.l) + '</label><select name="' + fd.k + '">' + opts(fd.sel, v) + '</select>';
+        else h += '<label>' + esc(fd.l) + '</label><input name="' + fd.k + '" value="' + esc(v === null || v === undefined ? '' : v) + '"' + (fd.num ? ' inputmode="decimal"' : '') + (fd.dir ? ' dir="' + fd.dir + '"' : '') + '>';
+      });
+      if (f.errs.length) h += '<div class="errs"><ul>' + f.errs.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul></div>';
+      h += '<div class="mf"><button type="button" data-act="gcancel">إلغاء</button><button class="pri" type="submit"' + (S.busy ? ' disabled' : '') + '>حفظ</button></div></form></div>';
+      var old = $('.modal'); if (old) old.remove();
+      rootEl.insertAdjacentHTML('beforeend', h);
+    }
+    function openG(id) {
+      var c = CFG[S.view], d = {};
+      c.fields.forEach(function (fd) { d[fd.k] = fd.def !== undefined ? fd.def : ''; });
+      if (id) { var r = S.rows.filter(function (x) { return x.id === id; })[0]; c.fields.forEach(function (fd) { d[fd.k] = r[fd.k] === null || r[fd.k] === undefined ? '' : r[fd.k]; }); }
+      S.gform = { id: id || null, data: d, errs: [] }; renderGModal();
+    }
+    function submitG(form) {
+      var c = CFG[S.view], d = {}, errs = [];
+      c.fields.forEach(function (fd) {
+        var el = form.elements[fd.k]; if (!el) return;
+        var v = fd.bool ? el.checked : String(el.value).trim();
+        d[fd.k] = v;
+        if (fd.req && !v) errs.push(fd.l + ' مطلوب');
+      });
+      if (c.table === 'projects') {
+        if (d.budget_amount !== '' && (isNaN(Number(d.budget_amount)) || Number(d.budget_amount) < 0)) errs.push('الميزانية يجب أن تكون رقمًا صفرًا أو أكثر');
+      }
+      if (c.table === 'parties' && d.vat_number && !/^3[0-9]{13}3$/.test(d.vat_number)) errs.push('الرقم الضريبي 15 رقمًا يبدأ وينتهي بـ 3');
+      if (d.code !== undefined && S.rows.some(function (x) { return x.id !== S.gform.id && x.code === d.code; })) errs.push('الكود مستخدم من قبل');
+      S.gform.data = d; S.gform.errs = errs;
+      if (errs.length) return renderGModal();
+      var id = S.gform.id, cid = S.company.id, main = {}, pc = {};
+      c.fields.forEach(function (fd) { var v = d[fd.k]; if (!fd.bool && v === '') v = null; if (fd.num && v !== null) v = Number(v); (fd.pc ? pc : main)[fd.k] = v; });
+      var p;
+      if (c.table === 'parties') {
+        var pcRow = { manara_account_code: pc.manara_account_code, active: pc.pc_active };
+        if (id) p = sb.from('parties').update(main).eq('id', id).then(function (r) {
+          if (r.error) return r; return sb.from('party_companies').update(pcRow).eq('party_id', id).eq('company_id', cid);
+        });
+        else p = sb.from('parties').insert(main).select().single().then(function (r) {
+          if (r.error) return r; return sb.from('party_companies').insert(Object.assign({ party_id: r.data.id, company_id: cid }, pcRow));
+        });
+      } else if (c.table === 'cost_centers') {
+        p = id ? sb.from('cost_centers').update(main).eq('id', id).eq('company_id', cid) : sb.from('cost_centers').insert(Object.assign({ company_id: cid }, main));
+      } else {
+        p = id ? sb.from(c.table).update(main).eq('id', id).eq('company_id', cid) : sb.from(c.table).insert(Object.assign({ company_id: cid }, main));
+      }
+      S.busy = true; renderGModal();
+      return Promise.resolve(p).then(function (r) {
+        S.busy = false;
+        if (r.error) { S.gform.errs = [R.translateDbError(r.error)]; return renderGModal(); }
+        S.gform = null; toast('تم الحفظ'); return loadView().then(render);
+      }, function (e) { S.busy = false; S.gform.errs = [R.translateDbError(e)]; renderGModal(); });
+    }
+    function linkParty(form) {
+      var pid = form.elements.pid.value; if (!pid) return;
+      return sb.from('party_companies').insert({ party_id: pid, company_id: S.company.id }).then(function (r) {
+        if (r.error) { fail(r.error); return render(); }
+        S.err = ''; toast('تم الربط'); return loadView().then(render);
+      });
     }
 
     rootEl.addEventListener('click', onClick);
