@@ -98,7 +98,17 @@ table.reg td{padding:.35rem .5rem;border-bottom:1px solid var(--bd);vertical-ali
 table.reg tr.off td{opacity:.55}
 table.reg td.num{text-align:end;font-variant-numeric:tabular-nums;white-space:nowrap}
 table.reg tr.subrow td{background:var(--bg);padding:.4rem 1rem .8rem}
+table.rp th.num{text-align:end}
+table.rp tr.h td{background:var(--chip);font-weight:700}
+table.rp tr.ind td:first-child{padding-inline-start:1.6rem}
+table.rp tr.st td{font-weight:600;border-top:1px solid var(--mut)}
+table.rp tr.sub td{font-weight:700;background:color-mix(in srgb,var(--pri) 8%,var(--card))}
+table.rp tr.tot td{font-weight:700;border-top:2px solid var(--tx);border-bottom:3px double var(--tx)}
+table.rp tr.chk td{color:var(--mut);font-size:.85rem}
+.rphead{text-align:center;margin-bottom:.8rem;line-height:1.7}.rphead strong{font-size:1.15rem}
 @media print{
+  .rpform,.rpnote{display:none!important}
+  .card.rpout{border:0;padding:0}
   .top,.pagebar,.sheetbar,.okbox,.ops,.toast,.mut,.err,tbody.draft,button{display:none!important}
   body{background:#fff;color:#000}
   .wrap.wide{padding:0}
