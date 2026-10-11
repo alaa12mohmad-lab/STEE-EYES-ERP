@@ -59,3 +59,26 @@ table.lines input.bad{outline:2px solid var(--err)}
 table.lines .num,table.lines td.num{text-align:end;font-variant-numeric:tabular-nums;min-width:6rem;white-space:nowrap}
 table.lines tfoot td{border-top:2px solid var(--bd);padding-top:.5rem;font-weight:600}
 .sub{padding:.4rem 1rem .8rem;background:var(--bg);border-bottom:1px solid var(--bd);overflow-x:auto}
+.wrap.wide{max-width:none;padding:.6rem}
+.sheetbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;position:sticky;top:3.4rem;z-index:4;background:var(--bg);padding:.4rem 0 .6rem}
+.sheetwrap{overflow:auto;border:1px solid var(--bd);border-radius:10px;background:var(--card)}
+table.sheet{border-collapse:collapse;width:100%;font-size:.88rem}
+table.sheet th{position:sticky;top:0;background:var(--chip);color:var(--mut);font-weight:600;padding:.35rem .4rem;text-align:start;border:1px solid var(--bd);white-space:nowrap;z-index:2}
+table.sheet td{border:1px solid var(--bd);padding:0;vertical-align:top}
+table.sheet tr.first td{border-top:3px solid var(--mut)}
+table.sheet td input,table.sheet td textarea{border:0;border-radius:0;background:transparent;width:100%;padding:.4rem .45rem;min-width:6.5rem}
+table.sheet td input:focus,table.sheet td textarea:focus{outline:2px solid var(--pri);outline-offset:-2px;background:var(--hov)}
+table.sheet td input:disabled{background:var(--chip);cursor:not-allowed}
+table.sheet td input.bad{background:color-mix(in srgb,var(--err) 14%,transparent)}
+table.sheet td input[list]:not([data-f=party]):not([data-f=project]):not([data-f=cc]){min-width:13rem}
+table.sheet td.en{min-width:5.5rem;padding:.4rem;text-align:center;background:var(--chip)}
+table.sheet .en-n{font-weight:700;margin-bottom:.2rem}
+table.sheet td.ed{min-width:9rem}
+table.sheet td.edesc{min-width:15rem}
+table.sheet td.edesc textarea{resize:vertical;min-height:2.4rem}
+table.sheet .mn{display:flex;gap:.3rem;align-items:center;font-size:.78rem;color:var(--mut);padding:0 .45rem}
+table.sheet .mn input{width:auto;min-width:0;padding:0}
+table.sheet td.ops{white-space:nowrap;padding:.15rem;min-width:4.5rem}
+table.sheet input.num{text-align:end;font-variant-numeric:tabular-nums;min-width:7rem}
+.eerr{margin:.3rem 0 0;padding-inline-start:1rem;color:var(--err);font-size:.78rem;text-align:start}
+.okbox{background:color-mix(in srgb,var(--ok) 10%,transparent);border:1px solid var(--ok);border-radius:8px;padding:.5rem .8rem;margin-bottom:.6rem}

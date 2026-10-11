@@ -263,7 +263,7 @@
         for (var i = 1; i < 4; i++) if (r[i].error) throw r[i].error;
         S.projects = r[1].data || []; S.ccs = r[2].data || [];
         S.parties = (r[3].data || []).filter(function (x) { return x.active && x.parties && x.parties.active; }).map(function (x) { return x.parties; }).sort(function (a, b) { return a.name.localeCompare(b.name, 'ar'); });
-        if (!S.ent) S.ent = newEntry();
+        if (!S.ent) S.ent = loadDraft() || newSheet();
       });
       if (S.view === 'entries') return sb.from('journal_entries').select('*').eq('company_id', id).order('fiscal_year', { ascending: false }).order('entry_no', { ascending: false }).limit(300).then(function (r) {
         if (r.error) throw r.error; S.entries = r.data || []; S.entLines = {}; S.openE = null;
@@ -346,9 +346,13 @@
       if (act === 'theme') return theme();
       if (act === 'logout') return sb.auth.signOut().then(function () { S.user = null; S.company = null; store('company', ''); S.err = ''; route(); });
       if (act === 'nav') return go(id);
-      if (act === 'eline-add') { S.ent.lines.push(blankLine()); return viewEntry(); }
-      if (act === 'eline-del') { S.ent.lines.splice(+id, 1); return viewEntry(); }
-      if (act === 'eclear') { S.ent = newEntry(S.ent.date); return viewEntry(); }
+      if (act === 'sh-addentry') { var le = S.ent.entries[S.ent.entries.length - 1]; S.ent.entries.push(blankEntry(le && le.date)); saveDraft(); return viewEntry({ e: S.ent.entries.length - 1, l: 0, f: 'acc' }); }
+      if (act === 'sh-delentry') { var de = S.ent.entries[+id]; if (root.confirm && entryUsed(de) && !root.confirm('حذف هذا القيد من الورقة؟')) return; S.ent.entries.splice(+id, 1); if (!S.ent.entries.length) S.ent.entries.push(blankEntry()); saveDraft(); return viewEntry(); }
+      if (act === 'sh-addline') { var nl = addLine(+id); saveDraft(); return viewEntry({ e: +id, l: nl, f: 'acc' }); }
+      if (act === 'sh-delline') { var pr = id.split(':'); S.ent.entries[+pr[0]].lines.splice(+pr[1], 1); saveDraft(); return viewEntry(); }
+      if (act === 'sh-save') return saveAll();
+      if (act === 'sh-hidelog') { S.ent.saved = []; return viewEntry(); }
+      if (act === 'sh-clear') { if (root.confirm && S.ent.entries.some(entryUsed) && !root.confirm('تفريغ الورقة كلها؟')) return; S.ent = newSheet(); clearDraft(); return viewEntry(); }
       if (act === 'eopen') return openEntry(id);
       if (act === 'erev') { S.rev = { id: id, date: today(), reason: '', err: '' }; return renderRev(); }
       if (act === 'revcancel') { S.rev = null; return viewEntries(); }
@@ -380,7 +384,7 @@
     }
 
     function onChange(ev) {
-      var el = ev.target, form = el.form; if (form && form.getAttribute('data-form') === 'entry') return entryChange(el);
+      var el = ev.target, form = el.form; if (el.closest && el.closest('[data-sheet]') || el.name === 'sheettype') return sheetChange(el);
       if (!form || form.getAttribute('data-form') !== 'acc') return;
       var f = readForm(form), prevType = S.form.account_type;
       var parent = f.parent_id ? byId(f.parent_id) : null;
@@ -394,7 +398,6 @@
       var form = ev.target, kind = form.getAttribute('data-form'); if (!kind) return;
       ev.preventDefault();
       if (kind === 'acc') return submitAccount(form);
-      if (kind === 'entry') return submitEntry();
       if (kind === 'rev') return submitRev(form);
       if (kind === 'gen') return submitG(form);
       if (kind === 'roles') return saveRoles(form);
@@ -412,7 +415,7 @@
     }
 
     function onInput(ev) {
-      if (ev.target.form && ev.target.form.getAttribute('data-form') === 'entry') { if (!entryInput(ev.target)) { var n = ev.target.name; if (n === 'desc' || n === 'manara_no') S.ent[n] = ev.target.value; } return; }
+      if (ev.target.closest && ev.target.closest('[data-sheet]')) return sheetInput(ev.target);
       if (ev.target.id === 'q') { S.q = ev.target.value; var pos = ev.target.selectionStart; render(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (e) { } } }
     }
 
@@ -578,123 +581,267 @@
       });
     }
 
-    /* ---------- القيد اليومي ---------- */
+    /* ---------- ورقة القيود: أكثر من قيد في الصفحة (شكل إكسيل) ---------- */
+    var uid = 0, ROWF = ['acc', 'party', 'project', 'cc', 'debit', 'credit'];
     function fmt(n) { return Number(n || 0).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
     function today() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
-    function blankLine() { return { acc: '', account_id: '', party_id: '', payee: '', project_id: '', cost_center_id: '', desc: '', debit: '', credit: '' }; }
-    function newEntry(keepDate) { return { date: keepDate || today(), type: 'regular', desc: '', in_manara: false, manara_no: '', lines: [blankLine(), blankLine()], errs: [], warns: [] }; }
-    function postables() { return S.accounts.filter(function (a) { return a.is_postable && a.is_active; }).sort(natCmp); }
-    function resolveAcc(txt) {
-      txt = String(txt || '').trim(); if (!txt) return null;
-      var list = postables(), code = txt.split(/\s+/)[0];
-      return list.filter(function (a) { return a.code + ' ' + a.name === txt; })[0] || list.filter(function (a) { return a.code === code; })[0] || null;
+    function normNum(v) {
+      return String(v === null || v === undefined ? '' : v).replace(/[٠-٩]/g, function (c) { return c.charCodeAt(0) - 1632; }).replace(/[۰-۹]/g, function (c) { return c.charCodeAt(0) - 1776; })
+        .replace(/[٫]/g, '.').replace(/[٬,\s]/g, '');
     }
-    function lineTotals() {
-      var d = 0, c = 0;
-      S.ent.lines.forEach(function (l) { d += Math.round((Number(l.debit) || 0) * 100); c += Math.round((Number(l.credit) || 0) * 100); });
+    function pnum(v) { var n = Number(normNum(v)); return isNaN(n) ? 0 : n; }
+    function blankLine() { return { acc: '', party: '', payee: '', project: '', cc: '', debit: '', credit: '' }; }
+    function blankEntry(date) { return { k: ++uid, date: date || today(), desc: '', in_manara: false, manara_no: '', lines: [blankLine(), blankLine()], errs: [] }; }
+    function newSheet() { return { type: 'regular', entries: [blankEntry()], saved: [], busy: false }; }
+    function draftKey() { return 'draft:' + S.company.id; }
+    function saveDraft() { try { localStorage.setItem(draftKey(), JSON.stringify({ type: S.ent.type, entries: S.ent.entries })); } catch (e) { } }
+    function clearDraft() { try { localStorage.removeItem(draftKey()); } catch (e) { } }
+    function loadDraft() {
+      try {
+        var d = JSON.parse(localStorage.getItem(draftKey()) || 'null');
+        if (d && d.entries && d.entries.length) { d.entries.forEach(function (e) { e.k = ++uid; e.errs = []; }); return { type: d.type || 'regular', entries: d.entries, saved: [], busy: false }; }
+      } catch (e) { }
+      return null;
+    }
+    function accIdx() {
+      if (S._ai && S._ai.src === S.accounts) return S._ai;
+      var ai = { src: S.accounts, list: postables(), byCode: {}, byFull: {} };
+      ai.list.forEach(function (a) { ai.byCode[a.code] = a; ai.byFull[a.code + ' ' + a.name] = a; });
+      return (S._ai = ai);
+    }
+    function postables() { return S.accounts.filter(function (a) { return a.is_postable && a.is_active; }).sort(natCmp); }
+    function resolveAcc(txt) { txt = String(txt || '').trim(); if (!txt) return null; var ai = accIdx(); return ai.byFull[txt] || ai.byCode[txt.split(/\s+/)[0]] || null; }
+    function kindOk(a, p) { return !a || a.party_kind === 'any' || p.kind === a.party_kind; }
+    function resolveParty(txt, a) { txt = String(txt || '').trim(); if (!txt) return null; return S.parties.filter(function (p) { return p.name === txt && kindOk(a, p); })[0] || null; }
+    function resolveCode(list, txt) {
+      txt = String(txt || '').trim(); if (!txt) return null;
+      return list.filter(function (x) { return x.code + ' ' + x.name === txt; })[0] || list.filter(function (x) { return x.code === txt.split(/\s+/)[0]; })[0] || null;
+    }
+    function actProjects() { return S.projects.filter(function (x) { return x.status === 'active'; }); }
+    function actCCs() { return S.ccs.filter(function (x) { return x.active; }); }
+    function lineUsed(l) { return !!(String(l.acc).trim() || pnum(l.debit) || pnum(l.credit)); }
+    function entryUsed(e) { return !!(String(e.desc).trim() || e.lines.some(lineUsed)); }
+    function entryDiff(e) {
+      var d = 0, c = 0; e.lines.forEach(function (l) { d += Math.round(pnum(l.debit) * 100); c += Math.round(pnum(l.credit) * 100); });
       return { d: d / 100, c: c / 100, diff: (d - c) / 100 };
     }
-    function sel(name, list, cur, ph, dis, ln, f) {
-      return '<select data-ln="' + ln + '" data-f="' + f + '"' + (dis ? ' disabled' : '') + '><option value="">' + ph + '</option>' +
-        list.map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === cur ? ' selected' : '') + '>' + esc((x.code ? x.code + ' ' : '') + x.name) + '</option>'; }).join('') + '</select>';
+    function sheetStats() {
+      var n = 0, bad = 0, d = 0, c = 0;
+      S.ent.entries.forEach(function (e) { if (!entryUsed(e)) return; n++; var t = entryDiff(e); d += t.d; c += t.c; if (t.diff !== 0 || t.d === 0) bad++; });
+      return { n: n, bad: bad, d: d, c: c };
     }
-    function viewEntry() {
-      var E = S.ent, t = lineTotals(), canType = S.company.role === 'admin' || S.company.role === 'accountant';
-      var h = topbar() + '<div class="wrap"><h2>قيد يومية جديد</h2>';
-      if (!canWrite() && S.company.role !== 'entry') return rootEl.innerHTML = h + '<div class="empty">صلاحيتك عرض فقط.</div></div>';
-      if (E.warns.length) h += '<div class="errs" style="color:var(--warn);border-color:var(--warn)"><ul>' + E.warns.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>';
-      h += '<form data-form="entry" class="card"><datalist id="acclist">' + postables().map(function (a) { return '<option value="' + esc(a.code + ' ' + a.name) + '">'; }).join('') + '</datalist>' +
-        '<div class="g2"><div><label>تاريخ القيد</label><input type="date" name="date" value="' + esc(E.date) + '"></div>' +
-        '<div><label>نوع القيد</label><select name="type"><option value="regular">قيد عادي</option>' + (canType ? '<option value="opening"' + (E.type === 'opening' ? ' selected' : '') + '>قيد افتتاحي</option><option value="adjustment"' + (E.type === 'adjustment' ? ' selected' : '') + '>قيد تسوية</option>' : '') + '</select></div></div>' +
-        '<label>البيان</label><input name="desc" value="' + esc(E.desc) + '">' +
-        '<div class="g2"><div class="chk" style="align-self:end"><input type="checkbox" name="in_manara" id="e_man"' + (E.in_manara ? ' checked' : '') + '><label for="e_man" style="margin:0">اتسجل في المنارة</label></div>' +
-        (E.in_manara ? '<div><label>رقم القيد في المنارة</label><input name="manara_no" value="' + esc(E.manara_no) + '" dir="ltr"></div>' : '') + '</div>' +
-        '<div style="overflow-x:auto"><table class="lines"><thead><tr><th>الحساب</th><th>الطرف</th><th>المشروع</th><th>مركز التكلفة</th><th>بيان السطر</th><th>مدين</th><th>دائن</th><th></th></tr></thead><tbody>';
-      E.lines.forEach(function (l, i) {
-        var a = l.account_id ? byId(l.account_id) : null;
-        var parties = a ? S.parties.filter(function (p) { return a.party_kind === 'any' || p.kind === a.party_kind; }) : [];
-        var pd = !a || a.party_rule === 'forbidden', jd = !a || a.project_rule === 'forbidden', cd = !a || a.cost_center_rule === 'forbidden';
-        h += '<tr><td><input data-ln="' + i + '" data-f="acc" list="acclist" value="' + esc(l.acc) + '" placeholder="كود أو اسم الحساب" class="w-acc' + (l.acc && !l.account_id ? ' bad' : '') + '"></td>' +
-          '<td>' + sel('p', parties, l.party_id, a && a.party_rule === 'required' ? 'مطلوب' : '—', pd, i, 'party_id') +
-          (a && a.is_advance_account && !l.party_id ? '<input data-ln="' + i + '" data-f="payee" placeholder="اسم المستلم" value="' + esc(l.payee) + '">' : '') + '</td>' +
-          '<td>' + sel('j', S.projects.filter(function (x) { return x.status === 'active'; }), l.project_id, a && a.project_rule === 'required' ? 'مطلوب' : '—', jd, i, 'project_id') + '</td>' +
-          '<td>' + sel('c', S.ccs.filter(function (x) { return x.active; }), l.cost_center_id, a && a.cost_center_rule === 'required' ? 'مطلوب' : '—', cd, i, 'cost_center_id') + '</td>' +
-          '<td><input data-ln="' + i + '" data-f="desc" value="' + esc(l.desc) + '"></td>' +
-          '<td><input data-ln="' + i + '" data-f="debit" inputmode="decimal" dir="ltr" class="num" value="' + esc(l.debit) + '"></td>' +
-          '<td><input data-ln="' + i + '" data-f="credit" inputmode="decimal" dir="ltr" class="num" value="' + esc(l.credit) + '"></td>' +
-          '<td>' + (E.lines.length > 2 ? '<button type="button" class="sm danger" data-act="eline-del" data-id="' + i + '">✕</button>' : '') + '</td></tr>';
+    function badge(e) {
+      var t = entryDiff(e), ok = t.diff === 0 && t.d > 0;
+      return '<span id="eb-' + e.k + '" class="chip ' + (ok ? 'g' : (entryUsed(e) ? 'w' : '')) + '">' + (ok ? 'متوازن ✓' : (entryUsed(e) ? 'الفرق ' + fmt(t.diff) : 'فارغ')) + '</span>';
+    }
+    function cellInput(ei, li, f, v, extra) {
+      return '<input data-e="' + ei + '" data-l="' + li + '" data-f="' + f + '" value="' + esc(v) + '"' + (extra || '') + ' autocomplete="off">';
+    }
+    function viewEntry(focus) {
+      var Sh = S.ent;
+      if (S.company.role === 'viewer') { rootEl.innerHTML = topbar() + '<div class="wrap"><div class="empty">صلاحيتك عرض فقط.</div></div>'; return; }
+      var canType = S.company.role === 'admin' || S.company.role === 'accountant', st = sheetStats();
+      var kinds = ['any', 'customer', 'supplier', 'employee', 'partner'];
+      var h = topbar() + '<div class="wrap wide" data-sheet><datalist id="acclist">' + accIdx().list.map(function (a) { return '<option value="' + esc(a.code + ' ' + a.name) + '">'; }).join('') + '</datalist>' +
+        kinds.map(function (k) { return '<datalist id="pl_' + k + '">' + S.parties.filter(function (p) { return k === 'any' || p.kind === k; }).map(function (p) { return '<option value="' + esc(p.name) + '">'; }).join('') + '</datalist>'; }).join('') +
+        '<datalist id="projlist">' + actProjects().map(function (p) { return '<option value="' + esc(p.code + ' ' + p.name) + '">'; }).join('') + '</datalist>' +
+        '<datalist id="cclist">' + actCCs().map(function (p) { return '<option value="' + esc(p.code + ' ' + p.name) + '">'; }).join('') + '</datalist>';
+      h += '<div class="sheetbar"><strong>ورقة القيود</strong>' +
+        (canType ? '<select name="sheettype" style="width:auto"><option value="regular">قيود عادية</option><option value="opening"' + (Sh.type === 'opening' ? ' selected' : '') + '>قيود افتتاحية</option><option value="adjustment"' + (Sh.type === 'adjustment' ? ' selected' : '') + '>قيود تسوية</option></select>' : '') +
+        '<span id="sh-stats" class="chip"></span><span class="sp"></span>' +
+        '<button class="sm" data-act="sh-addentry">+ قيد جديد</button><button class="sm" data-act="sh-clear">تفريغ الورقة</button>' +
+        '<button class="pri" data-act="sh-save" id="sh-save"' + (Sh.busy ? ' disabled' : '') + '>' + (Sh.busy ? 'جارٍ الحفظ…' : 'حفظ كل القيود') + '</button></div>';
+      if (Sh.saved.length) {
+        h += '<div class="okbox"><button class="sm" style="float:left" data-act="sh-hidelog">إخفاء</button><strong>تم حفظ ' + Sh.saved.length + ' قيد:</strong> ' +
+          Sh.saved.map(function (x) { return '<span class="chip g">' + esc(x.no) + '</span>'; }).join('') +
+          Sh.saved.filter(function (x) { return x.warns && x.warns.length; }).map(function (x) { return '<div class="mut">⚠ ' + esc(x.no) + ': ' + esc(x.warns.join('؛ ')) + '</div>'; }).join('') + '</div>';
+      }
+      h += '<div class="sheetwrap"><table class="sheet"><thead><tr><th>القيد</th><th>التاريخ</th><th>الحساب</th><th>الطرف</th><th>المشروع</th><th>مركز التكلفة</th><th>مدين</th><th>دائن</th><th>البيان</th><th></th></tr></thead>';
+      Sh.entries.forEach(function (e, ei) {
+        var n = e.lines.length;
+        h += '<tbody>';
+        e.lines.forEach(function (l, li) {
+          var a = resolveAcc(l.acc), pd = !a || a.party_rule === 'forbidden', jd = !a || a.project_rule === 'forbidden', cd = !a || a.cost_center_rule === 'forbidden';
+          var pOk = !l.party || resolveParty(l.party, a), jOk = !l.project || resolveCode(S.projects, l.project), cOk = !l.cc || resolveCode(S.ccs, l.cc);
+          h += '<tr' + (li === 0 ? ' class="first"' : '') + '>';
+          if (li === 0) {
+            h += '<td rowspan="' + n + '" class="en"><div class="en-n">قيد ' + (ei + 1) + '</div>' + badge(e) +
+              '<div><button class="sm danger" data-act="sh-delentry" data-id="' + ei + '" title="حذف القيد من الورقة">✕</button></div>' +
+              (e.errs.length ? '<ul class="eerr">' + e.errs.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' : '') + '</td>' +
+              '<td rowspan="' + n + '" class="ed"><input type="date" data-e="' + ei + '" data-ef="date" value="' + esc(e.date) + '"></td>';
+          }
+          h += '<td>' + cellInput(ei, li, 'acc', l.acc, ' list="acclist" class="' + (l.acc && !a ? 'bad' : '') + '"') + '</td>' +
+            '<td>' + cellInput(ei, li, 'party', l.party, ' list="pl_' + (a ? a.party_kind : 'any') + '"' + (pd ? ' disabled' : '') + ' class="' + (pOk ? '' : 'bad') + '" placeholder="' + (a && a.party_rule === 'required' ? 'مطلوب' : '') + '"') +
+            cellInput(ei, li, 'payee', l.payee, ' placeholder="اسم المستلم"' + (a && a.is_advance_account && !l.party ? '' : ' hidden')) + '</td>' +
+            '<td>' + cellInput(ei, li, 'project', l.project, ' list="projlist"' + (jd ? ' disabled' : '') + ' class="' + (jOk ? '' : 'bad') + '" placeholder="' + (a && a.project_rule === 'required' ? 'مطلوب' : '') + '"') + '</td>' +
+            '<td>' + cellInput(ei, li, 'cc', l.cc, ' list="cclist"' + (cd ? ' disabled' : '') + ' class="' + (cOk ? '' : 'bad') + '" placeholder="' + (a && a.cost_center_rule === 'required' ? 'مطلوب' : '') + '"') + '</td>' +
+            '<td>' + cellInput(ei, li, 'debit', l.debit, ' inputmode="decimal" dir="ltr" class="num"') + '</td>' +
+            '<td>' + cellInput(ei, li, 'credit', l.credit, ' inputmode="decimal" dir="ltr" class="num"') + '</td>';
+          if (li === 0) {
+            h += '<td rowspan="' + n + '" class="edesc"><textarea data-e="' + ei + '" data-ef="desc" rows="1" placeholder="بيان القيد">' + esc(e.desc) + '</textarea>' +
+              '<label class="mn"><input type="checkbox" data-e="' + ei + '" data-ef="in_manara"' + (e.in_manara ? ' checked' : '') + '> منارة</label>' +
+              (e.in_manara ? '<input data-e="' + ei + '" data-ef="manara_no" dir="ltr" placeholder="رقم المنارة" value="' + esc(e.manara_no) + '" class="mno">' : '') + '</td>';
+          }
+          h += '<td class="ops">' + (n > 2 ? '<button class="sm" data-act="sh-delline" data-id="' + ei + ':' + li + '" title="حذف السطر">−</button>' : '') +
+            (li === n - 1 ? '<button class="sm" data-act="sh-addline" data-id="' + ei + '" title="إضافة سطر">+</button>' : '') + '</td></tr>';
+        });
+        h += '</tbody>';
       });
-      var ok = t.diff === 0 && t.d > 0;
-      h += '</tbody><tfoot><tr><td colspan="5"><button type="button" class="sm" data-act="eline-add">+ سطر</button> <span id="ediff" class="chip ' + (ok ? 'g' : 'w') + '">' + (ok ? 'متوازن' : 'الفرق ' + fmt(t.diff)) + '</span></td>' +
-        '<td class="num" id="etd">' + fmt(t.d) + '</td><td class="num" id="etc">' + fmt(t.c) + '</td><td></td></tr></tfoot></table></div>';
-      if (E.errs.length) h += '<div class="errs"><ul>' + E.errs.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul></div>';
-      h += '<div class="mf"><button type="button" data-act="eclear">تفريغ</button><button class="pri" type="submit" id="esave"' + (ok && !S.busy ? '' : ' disabled') + '>' + (S.busy ? 'جارٍ الحفظ…' : 'حفظ القيد') + '</button></div></form></div>';
+      h += '</table></div><p class="mut" style="font-size:.82rem">Enter ينقلك للخلية التالية، وعند آخر سطر في قيد غير متوازن يضيف سطرًا بالفرق تلقائيًا، وعند التوازن ينقلك للقيد التالي. المسودة تتحفظ تلقائيًا على هذا المتصفح.</p></div>';
       rootEl.innerHTML = h;
+      refreshSheet();
+      if (focus) focusCell(focus);
     }
-    function refreshTotals() {
-      var t = lineTotals(), ok = t.diff === 0 && t.d > 0, d = $('#ediff');
-      if (!d) return;
-      d.textContent = ok ? 'متوازن' : 'الفرق ' + fmt(t.diff); d.className = 'chip ' + (ok ? 'g' : 'w');
-      $('#etd').textContent = fmt(t.d); $('#etc').textContent = fmt(t.c); $('#esave').disabled = !(ok && !S.busy);
+    function focusCell(f) {
+      var el = f.ef ? rootEl.querySelector('[data-e="' + f.e + '"][data-ef="' + f.ef + '"]') : rootEl.querySelector('[data-e="' + f.e + '"][data-l="' + f.l + '"][data-f="' + f.f + '"]');
+      if (el && !el.disabled) { el.focus(); if (el.select && el.type !== 'date') { try { el.select(); } catch (x) { } } }
+      return el;
     }
-    function entryInput(el) {
-      var E = S.ent, f = el.getAttribute('data-f'), i = el.getAttribute('data-ln');
-      if (i === null) return false;
-      var l = E.lines[+i]; if (!l) return true;
-      if (f === 'debit' || f === 'credit') {
-        l[f] = el.value; if (Number(el.value) > 0) { var o = f === 'debit' ? 'credit' : 'debit'; if (l[o] !== '') { l[o] = ''; var oe = rootEl.querySelector('[data-ln="' + i + '"][data-f="' + o + '"]'); if (oe) oe.value = ''; } }
-        refreshTotals();
-      } else if (f !== 'acc') l[f] = el.value;
-      return true;
+    function refreshSheet() {
+      var st = sheetStats(), s = $('#sh-stats'); if (!s) return;
+      s.textContent = st.n + ' قيد · مدين ' + fmt(st.d) + ' · دائن ' + fmt(st.c) + (st.bad ? ' · غير متوازن/ناقص: ' + st.bad : '');
+      s.className = 'chip ' + (st.n && !st.bad ? 'g' : (st.bad ? 'w' : ''));
+      S.ent.entries.forEach(function (e) { var b = rootEl.querySelector('#eb-' + e.k); if (b) { b.outerHTML = badge(e); } });
     }
-    function entryChange(el) {
-      var E = S.ent, f = el.getAttribute('data-f'), i = el.getAttribute('data-ln');
-      if (i === null) { if (el.name) { E[el.name] = el.type === 'checkbox' ? el.checked : el.value; if (el.name === 'in_manara') viewEntry(); } return; }
-      var l = E.lines[+i];
-      if (f === 'acc') {
-        var a = resolveAcc(el.value); l.acc = a ? a.code + ' ' + a.name : el.value; l.account_id = a ? a.id : '';
-        if (a) { if (a.party_rule === 'forbidden') l.party_id = ''; if (a.project_rule === 'forbidden') l.project_id = ''; if (a.cost_center_rule === 'forbidden') l.cost_center_id = '';
-          if (l.party_id && a.party_kind !== 'any') { var p = S.parties.filter(function (x) { return x.id === l.party_id; })[0]; if (!p || p.kind !== a.party_kind) l.party_id = ''; } }
-        else { l.party_id = l.project_id = l.cost_center_id = ''; }
-        viewEntry(); var nx = rootEl.querySelector('[data-ln="' + i + '"][data-f="' + (a && a.party_rule !== 'forbidden' ? 'party_id' : 'debit') + '"]'); if (nx) nx.focus();
-      } else { l[f] = el.value; if (f === 'party_id') viewEntry(); }
+    function sheetInput(el) {
+      var Sh = S.ent, ei = el.getAttribute('data-e'), e = Sh.entries[+ei]; if (!e) return;
+      var ef = el.getAttribute('data-ef');
+      if (ef) { if (ef !== 'in_manara') e[ef] = el.value; saveDraft(); return; }
+      var l = e.lines[+el.getAttribute('data-l')], f = el.getAttribute('data-f'); if (!l) return;
+      l[f] = el.value;
+      if ((f === 'debit' || f === 'credit') && pnum(el.value) > 0) {
+        var o = f === 'debit' ? 'credit' : 'debit';
+        if (l[o] !== '') { l[o] = ''; var oe = rootEl.querySelector('[data-e="' + ei + '"][data-l="' + el.getAttribute('data-l') + '"][data-f="' + o + '"]'); if (oe) oe.value = ''; }
+      }
+      if (f === 'debit' || f === 'credit') refreshSheet();
+      saveDraft();
     }
-    function validateEntry() {
-      var E = S.ent, e = [];
-      if (!E.date) e.push('تاريخ القيد مطلوب');
-      if (!String(E.desc).trim()) e.push('بيان القيد مطلوب');
-      if (E.in_manara === false && String(E.manara_no).trim()) e.push('رقم المنارة بدون تأشير «اتسجل في المنارة»');
-      E.lines.forEach(function (l, i) {
-        var n = 'السطر ' + (i + 1) + ': ', a = l.account_id ? byId(l.account_id) : null;
-        if (!a) return e.push(n + 'اختر حسابًا من القائمة');
-        var d = Number(l.debit) || 0, c = Number(l.credit) || 0;
-        if ((d > 0) === (c > 0)) e.push(n + 'ادخل مدين أو دائن (واحد فقط)');
-        if (Math.round(d * 100) / 100 !== d || Math.round(c * 100) / 100 !== c) e.push(n + 'المبلغ بحد أقصى خانتين عشريتين');
-        if (a.party_rule === 'required' && !l.party_id) e.push(n + 'الحساب ' + a.code + ' يتطلب طرفًا');
-        if (a.project_rule === 'required' && !l.project_id) e.push(n + 'الحساب ' + a.code + ' يتطلب مشروعًا');
-        if (a.cost_center_rule === 'required' && !l.cost_center_id) e.push(n + 'الحساب ' + a.code + ' يتطلب مركز تكلفة');
-        if (a.equipment_rule === 'required') e.push(n + 'الحساب ' + a.code + ' يتطلب معدة (شاشة المعدات لم تُضف بعد)');
-        if (a.is_advance_account && !l.party_id && !String(l.payee).trim()) e.push(n + 'الدفعة المقدمة بلا طرف تحتاج اسم المستلم');
+    function nextField(a, f, l) {
+      var i = ROWF.indexOf(f);
+      for (var j = i + 1; j < ROWF.length; j++) {
+        var k = ROWF[j];
+        if (k === 'party' && (!a || a.party_rule === 'forbidden')) continue;
+        if (k === 'project' && (!a || a.project_rule === 'forbidden')) continue;
+        if (k === 'cc' && (!a || a.cost_center_rule === 'forbidden')) continue;
+        if (k === 'credit' && f === 'debit' && pnum(l.debit) > 0) continue;
+        return k;
+      }
+      return null;
+    }
+    function addLine(ei) {
+      var e = S.ent.entries[ei], t = entryDiff(e), l = blankLine();
+      if (t.diff > 0) l.credit = String(t.diff); else if (t.diff < 0) l.debit = String(-t.diff);
+      e.lines.push(l); return e.lines.length - 1;
+    }
+    function cell(ei, li, f) { return rootEl.querySelector('[data-e="' + ei + '"][data-l="' + li + '"][data-f="' + f + '"]'); }
+    function updateRowDom(ei, li) {
+      var l = S.ent.entries[ei].lines[li], a = resolveAcc(l.acc), m = { acc: ['', 0], party: ['party_rule', 1], project: ['project_rule', 1], cc: ['cost_center_rule', 1] };
+      var el = cell(ei, li, 'acc'); if (el) { el.value = l.acc; el.classList.toggle('bad', !!l.acc && !a); }
+      [['party', 'party_rule'], ['project', 'project_rule'], ['cc', 'cost_center_rule']].forEach(function (x) {
+        var c = cell(ei, li, x[0]); if (!c) return;
+        c.disabled = !a || a[x[1]] === 'forbidden'; c.value = l[x[0]]; c.placeholder = a && a[x[1]] === 'required' ? 'مطلوب' : '';
+        if (x[0] === 'party') c.setAttribute('list', 'pl_' + (a ? a.party_kind : 'any'));
+        c.classList.remove('bad');
       });
-      var t = lineTotals(); if (t.diff !== 0) e.push('القيد غير متوازن: الفرق ' + fmt(t.diff));
-      return e;
+      var py = cell(ei, li, 'payee'); if (py) { py.value = l.payee; py.hidden = !(a && a.is_advance_account && !l.party); }
     }
-    function submitEntry() {
-      var E = S.ent; E.errs = validateEntry(); E.warns = [];
-      if (E.errs.length) return viewEntry();
-      var payload = { company_id: S.company.id, entry_date: E.date, description: String(E.desc).trim(), entry_type: E.type, voucher_type: 'journal',
-        in_manara: !!E.in_manara, manara_no: E.in_manara ? (String(E.manara_no).trim() || null) : null,
-        lines: E.lines.map(function (l) { return { account_id: l.account_id, debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
-          party_id: l.party_id || null, payee_name: l.payee ? String(l.payee).trim() : null, project_id: l.project_id || null,
-          cost_center_id: l.cost_center_id || null, description: l.desc || null }; }) };
-      S.busy = true; viewEntry();
-      return Promise.resolve(sb.rpc('post_entry', { p: payload })).then(function (r) {
-        S.busy = false;
-        if (r.error) { E.errs = [R.translateDbError(r.error)]; return viewEntry(); }
-        var d = r.data || {}, date = E.date;
-        S.ent = newEntry(date); S.ent.warns = d.warnings || [];
-        toast('تم القيد رقم ' + d.fiscal_year + '/' + d.entry_no); viewEntry();
-      }, function (e) { S.busy = false; E.errs = [R.translateDbError(e)]; viewEntry(); });
+    function sheetKey(ev) {
+      var el = ev.target; if (ev.key !== 'Enter' || !el.getAttribute || el.tagName === 'TEXTAREA' || el.getAttribute('data-f') === null) return;
+      var Sh = S.ent, ei = +el.getAttribute('data-e'), li = +el.getAttribute('data-l'), f = el.getAttribute('data-f'), e = Sh.entries[ei]; if (!e) return;
+      ev.preventDefault();
+      if (f === 'acc' && el.value !== (e.lines[li].acc)) { e.lines[li].acc = el.value; }
+      var l = e.lines[li], a = resolveAcc(l.acc);
+      if (f === 'acc') { canon(l); a = resolveAcc(l.acc); }
+      var nf = nextField(a, f, l);
+      if (nf) { if (f === 'acc') { saveDraft(); updateRowDom(ei, li); } focusCell({ e: ei, l: li, f: nf }); return; }
+      /* نهاية السطر */
+      if (li < e.lines.length - 1) return viewEntry({ e: ei, l: li + 1, f: 'acc' });
+      var t = entryDiff(e);
+      if (t.diff !== 0) { var nl = addLine(ei); saveDraft(); return viewEntry({ e: ei, l: nl, f: 'acc' }); }
+      if (ei < Sh.entries.length - 1) return viewEntry({ e: ei + 1, l: 0, f: 'acc' });
+      Sh.entries.push(blankEntry(e.date)); saveDraft(); viewEntry({ e: ei + 1, l: 0, f: 'acc' });
+    }
+    function canon(l) {
+      var a = resolveAcc(l.acc);
+      if (a) {
+        l.acc = a.code + ' ' + a.name;
+        if (a.party_rule === 'forbidden') { l.party = ''; l.payee = ''; } else if (l.party && !resolveParty(l.party, a)) l.party = '';
+        if (a.project_rule === 'forbidden') l.project = '';
+        if (a.cost_center_rule === 'forbidden') l.cc = '';
+      } else { l.party = l.project = l.cc = l.payee = ''; }
+    }
+    function sheetChange(el) {
+      var Sh = S.ent;
+      if (el.name === 'sheettype') { Sh.type = el.value; return saveDraft(); }
+      var ei = +el.getAttribute('data-e'), e = Sh.entries[ei]; if (!e) return;
+      var ef = el.getAttribute('data-ef');
+      if (ef) { if (ef === 'in_manara') { e.in_manara = el.checked; if (!el.checked) e.manara_no = ''; saveDraft(); return viewEntry({ e: ei, ef: ef }); } e[ef] = el.value; return saveDraft(); }
+      var li = +el.getAttribute('data-l'), f = el.getAttribute('data-f'), l = e.lines[li]; if (!l) return;
+      if (f === 'acc') { l.acc = el.value; canon(l); saveDraft(); return updateRowDom(ei, li); }
+      if (f === 'debit' || f === 'credit') { var n = pnum(el.value); l[f] = n ? String(n) : ''; el.value = l[f]; refreshSheet(); return saveDraft(); }
+      l[f] = el.value;
+      var a2 = resolveAcc(l.acc), ok = true;
+      if (f === 'party') { var p = resolveParty(el.value, a2); ok = !el.value || !!p; if (p) { l.party = p.name; el.value = p.name; } }
+      if (f === 'project') { var j = resolveCode(S.projects, el.value); ok = !el.value || !!j; if (j) { l.project = j.code + ' ' + j.name; el.value = l.project; } }
+      if (f === 'cc') { var c = resolveCode(S.ccs, el.value); ok = !el.value || !!c; if (c) { l.cc = c.code + ' ' + c.name; el.value = l.cc; } }
+      el.classList.toggle('bad', !ok); if (f === 'party') { var py = cell(ei, li, 'payee'); if (py) py.hidden = !(a2 && a2.is_advance_account && !l.party); } saveDraft();
+    }
+    function validateOne(e) {
+      var errs = [], lines = [];
+      if (!e.date) errs.push('تاريخ القيد مطلوب');
+      if (!String(e.desc).trim()) errs.push('بيان القيد مطلوب');
+      if (!e.in_manara && String(e.manara_no).trim()) errs.push('رقم المنارة بدون تأشير «منارة»');
+      e.lines.forEach(function (l, i) {
+        if (!lineUsed(l)) return;
+        var n = 'السطر ' + (i + 1) + ': ', a = resolveAcc(l.acc);
+        if (!a) return errs.push(n + 'اختر حسابًا من القائمة');
+        var d = pnum(l.debit), c = pnum(l.credit);
+        if ((d > 0) === (c > 0)) errs.push(n + 'ادخل مدين أو دائن (واحد فقط)');
+        if (Math.round(d * 100) / 100 !== d || Math.round(c * 100) / 100 !== c) errs.push(n + 'المبلغ بحد أقصى خانتين عشريتين');
+        var p = l.party ? resolveParty(l.party, a) : null, pj = l.project ? resolveCode(S.projects, l.project) : null, cc = l.cc ? resolveCode(S.ccs, l.cc) : null;
+        if (l.party && !p) errs.push(n + 'الطرف غير موجود أو لا يناسب الحساب');
+        if (l.project && !pj) errs.push(n + 'المشروع غير موجود');
+        if (l.cc && !cc) errs.push(n + 'مركز التكلفة غير موجود');
+        if (a.party_rule === 'required' && !p) errs.push(n + 'الحساب ' + a.code + ' يتطلب طرفًا');
+        if (a.project_rule === 'required' && !pj) errs.push(n + 'الحساب ' + a.code + ' يتطلب مشروعًا');
+        if (a.cost_center_rule === 'required' && !cc) errs.push(n + 'الحساب ' + a.code + ' يتطلب مركز تكلفة');
+        if (a.equipment_rule === 'required') errs.push(n + 'الحساب ' + a.code + ' يتطلب معدة (شاشة المعدات لم تُضف بعد)');
+        if (a.is_advance_account && !p && !String(l.payee).trim()) errs.push(n + 'الدفعة المقدمة بلا طرف تحتاج اسم المستلم');
+        lines.push({ account_id: a.id, debit: d, credit: c, party_id: p ? p.id : null, payee_name: !p && l.payee ? String(l.payee).trim() : null, project_id: pj ? pj.id : null, cost_center_id: cc ? cc.id : null });
+      });
+      if (lines.length < 2) errs.push('القيد يحتاج سطرين على الأقل');
+      var t = entryDiff(e); if (t.diff !== 0) errs.push('القيد غير متوازن: الفرق ' + fmt(t.diff));
+      return { errs: errs, lines: lines };
+    }
+    function saveAll() {
+      var Sh = S.ent; if (Sh.busy) return;
+      var list = Sh.entries.filter(entryUsed), bad = 0, res = [];
+      Sh.entries.forEach(function (e) { e.errs = []; });
+      if (!list.length) return toast('الورقة فاضية');
+      list.forEach(function (e) { var v = validateOne(e); e.errs = v.errs; res.push(v); if (v.errs.length) bad++; });
+      if (bad) { viewEntry(); toast('فيه ' + bad + ' قيد محتاج تصحيح. لم يُحفظ شيء.'); var first = rootEl.querySelector('.eerr'); if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center' }); return; }
+      Sh.busy = true; Sh.saved = []; viewEntry();
+      var i = 0;
+      function done(stopped) {
+        Sh.busy = false;
+        if (!Sh.entries.length) Sh.entries.push(blankEntry());
+        if (Sh.entries.every(function (x) { return !entryUsed(x); })) clearDraft(); else saveDraft();
+        viewEntry(); toast(stopped ? 'توقف الحفظ عند قيد فيه خطأ. اللي قبله اتحفظ.' : 'تم حفظ ' + Sh.saved.length + ' قيد');
+      }
+      function next() {
+        if (i >= list.length) return done(false);
+        var e = list[i];
+        var payload = { company_id: S.company.id, entry_date: e.date, description: String(e.desc).trim(), entry_type: Sh.type, voucher_type: 'journal',
+          in_manara: !!e.in_manara, manara_no: e.in_manara ? (String(e.manara_no).trim() || null) : null, lines: res[i].lines };
+        return Promise.resolve(sb.rpc('post_entry', { p: payload })).then(function (r) {
+          if (r.error) { e.errs = [R.translateDbError(r.error)]; return done(true); }
+          var d = r.data || {};
+          Sh.saved.push({ no: d.fiscal_year + '/' + d.entry_no, warns: d.warnings || [] });
+          Sh.entries = Sh.entries.filter(function (x) { return x.k !== e.k; });
+          i++; return next();
+        }, function (er) { e.errs = [R.translateDbError(er)]; return done(true); });
+      }
+      return next();
     }
 
     /* ---------- سجل القيود ---------- */
@@ -754,6 +901,7 @@
     rootEl.addEventListener('change', onChange);
     rootEl.addEventListener('submit', onSubmit);
     rootEl.addEventListener('input', onInput);
+    rootEl.addEventListener('keydown', function (ev) { if (ev.target.closest && ev.target.closest('[data-sheet]')) sheetKey(ev); });
     return { start: start, state: S };
   }
 
