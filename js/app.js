@@ -35,8 +35,8 @@
 
   function create(sb, rootEl, doc) {
     doc = doc || root.document;
-    var NAV = [['entry', 'قيد اليومية'], ['entries', 'سجل القيود'], ['reports', 'القوائم المالية'], ['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
-    var rp;
+    var NAV = [['entry', 'قيد اليومية'], ['entries', 'سجل القيود'], ['invoices', 'الفواتير'], ['vouchers', 'السندات'], ['reports', 'القوائم المالية'], ['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
+    var rp, dc;
     var S = { view: 'accounts', cur: undefined, pages: [], pg: { id: null, no: null, entries: [], reversed: {} }, reg: null, hl: null, ent: null, entries: [], entLines: {}, openE: null, rev: null, parties: [], projects: [], ccs: [], rows: [], roleMap: {}, gform: null, user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
 
     function $(sel) { return rootEl.querySelector(sel); }
@@ -237,7 +237,7 @@
 
     function enterCompany(id) {
       S.company = S.companies.filter(function (c) { return c.id === id; })[0]; if (!S.company) return Promise.resolve();
-      store('company', id); S.q = ''; S.form = null; S.err = ''; S.ent = null; S.cur = undefined; S.pages = []; S.reg = null; rp = newRp();
+      store('company', id); S.q = ''; S.form = null; S.err = ''; S.ent = null; S.cur = undefined; S.pages = []; S.reg = null; rp = newRp(); dc = newDc();
       S.view = 'accounts';
       return loadAccounts().then(viewAccounts, function (e) { fail(e); viewAccounts(); });
     }
@@ -248,7 +248,7 @@
       return render();
     }
     function render() {
-      return ({ entry: viewEntry, entries: viewEntries, reports: function () { rp.init(); rp.view(); }, accounts: viewAccounts, roles: viewRoles, projects: viewList, cost_centers: viewList, parties: viewList }[S.view] || viewAccounts)();
+      return ({ entry: viewEntry, entries: viewEntries, reports: function () { rp.init(); rp.view(); }, invoices: function () { dc.view('invoices'); }, vouchers: function () { dc.view('vouchers'); }, accounts: viewAccounts, roles: viewRoles, projects: viewList, cost_centers: viewList, parties: viewList }[S.view] || viewAccounts)();
     }
     function go(v) {
       S.view = v; S.q = ''; S.err = ''; S.form = null; S.gform = null;
@@ -257,6 +257,7 @@
     function loadView() {
       var id = S.company.id;
       if (S.view === 'accounts' || S.view === 'reports') return loadAccounts();
+      if (S.view === 'invoices' || S.view === 'vouchers') return loadAccounts().then(function () { return dc.init(S.view); });
       if (S.view === 'entry' || S.view === 'entries') return Promise.all([loadAccounts(),
         sb.from('projects').select('id,code,name,status').eq('company_id', id).order('code'),
         sb.from('cost_centers').select('id,code,name,active').eq('company_id', id).order('code'),
@@ -346,6 +347,7 @@
       var act = t.getAttribute('data-act'), id = t.getAttribute('data-id');
       if (act === 'theme') return theme();
       if (act.indexOf('rp-') === 0) return rp.click(act);
+      if (act.indexOf('dc-') === 0) { ev.preventDefault(); return dc.click(act, id, t.getAttribute('data-t')); }
       if (act === 'logout') return sb.auth.signOut().then(function () { S.user = null; S.company = null; store('company', ''); S.err = ''; route(); });
       if (act === 'nav') return go(id);
       if (act === 'sh-addentry') { var le = S.ent.entries[S.ent.entries.length - 1]; S.ent.entries.push(blankEntry(le && le.date)); saveDraft(); return viewEntry({ e: S.ent.entries.length - 1, l: 0, f: 'acc' }); }
@@ -394,7 +396,7 @@
     }
 
     function onChange(ev) {
-      var el = ev.target, form = el.form; if (form && form.getAttribute('data-form') === 'rp') return rp.change(el); if (el.closest && el.closest('[data-sheet]') || el.name === 'sheettype') return sheetChange(el);
+      var el = ev.target, form = el.form; if (form && form.getAttribute('data-form') === 'rp') return rp.change(el); if (el.closest && el.closest('[data-docs]')) return dc.change(el); if (el.closest && el.closest('[data-sheet]') || el.name === 'sheettype') return sheetChange(el);
       if (!form || form.getAttribute('data-form') !== 'acc') return;
       var f = readForm(form), prevType = S.form.account_type;
       var parent = f.parent_id ? byId(f.parent_id) : null;
@@ -410,6 +412,7 @@
       if (kind === 'acc') return submitAccount(form);
       if (kind === 'rev') return submitRev(form);
       if (kind === 'rp') return rp.submit(form);
+      if (kind.indexOf('dc-') === 0) return dc.submit(form);
       if (kind === 'regf') { readRegF(form); S.reg.p = 0; S.err = ''; return runRegister().then(viewEntries, function (e) { fail(e); viewEntries(); }); }
       if (kind === 'gen') return submitG(form);
       if (kind === 'roles') return saveRoles(form);
@@ -427,6 +430,7 @@
     }
 
     function onInput(ev) {
+      if (ev.target.closest && ev.target.closest('[data-docs]')) return dc.input(ev.target);
       if (ev.target.closest && ev.target.closest('[data-sheet]')) return sheetInput(ev.target);
       if (ev.target.id === 'q') { S.q = ev.target.value; var pos = ev.target.selectionStart; render(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (e) { } } }
     }
@@ -1131,7 +1135,34 @@
       var A = root.AccReports; if (!A) return { init: function () { }, view: function () { rootEl.innerHTML = topbar() + '<div class="wrap"><div class="err">ملف reports.js غير محمّل</div></div>'; }, click: function () { }, submit: function () { }, change: function () { } };
       return A.create({ S: S, sb: sb, esc: esc, $: $, rootEl: rootEl, topbar: topbar, today: today, download: download, csvCell: csvCell, translate: function (e) { return R.translateDbError(e); } });
     }
-    rp = newRp();
+    function newDc() {
+      var A = root.AccDocs;
+      var stub = { init: function () { return Promise.resolve(); }, view: function () { rootEl.innerHTML = topbar() + '<div class="wrap"><div class="err">ملف docs.js غير محمّل</div></div>'; }, click: function () { }, input: function () { }, change: function () { }, submit: function () { }, reset: function () { } };
+      if (!A) return stub;
+      return A.create({ S: S, sb: sb, esc: esc, rootEl: rootEl, doc: doc, topbar: topbar, today: today, translate: function (e) { return R.translateDbError(e); }, linkEntry: linkEntry });
+    }
+    /* ربط قيد (فاتورة/سند) بصفحة قيود: نفس صفحة قيد سابق، وإلا آخر صفحة فيها مكان، وإلا صفحة جديدة */
+    function linkEntry(entryId, likeId) {
+      var cid = S.company.id;
+      function add(pageId, no) { return Promise.resolve(sb.rpc('add_page_entry', { p_page: pageId, p_entry: entryId })).then(function (r) { if (r.error) throw r.error; return no; }); }
+      function pageNoOf(pid) { var p = S.pages.filter(function (x) { return x.id === pid; })[0]; return p ? p.page_no : null; }
+      var p0 = likeId ? Promise.resolve(sb.from('entry_page_items').select('page_id').eq('entry_id', likeId)).then(function (r) { return (r.data || [])[0] ? r.data[0].page_id : null; }) : Promise.resolve(null);
+      return p0.then(function (same) {
+        if (same) return loadPages().then(function () { return add(same, pageNoOf(same)); });
+        return loadPages().then(function () {
+          var last = S.pages[S.pages.length - 1];
+          if (!last) return null;
+          return Promise.resolve(sb.from('entry_page_items').select('entry_id', { count: 'exact', head: true }).eq('page_id', last.id)).then(function (c) {
+            return (c.count || 0) < 80 ? add(last.id, last.page_no) : null;
+          });
+        }).then(function (done) {
+          if (done) return done;
+          return Promise.resolve(sb.rpc('create_entry_page', { p_company: cid })).then(function (r) { if (r.error) throw r.error; return add(r.data.page_id, r.data.page_no); });
+        });
+      }).then(function (no) { return loadPages().then(function () { return no; }); }, function () { return null; });
+    }
+    function doc_() { return doc; }
+    rp = newRp(); dc = newDc();
 
     rootEl.addEventListener('click', onClick);
     rootEl.addEventListener('change', onChange);
