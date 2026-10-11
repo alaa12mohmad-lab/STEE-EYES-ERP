@@ -50,3 +50,12 @@ legend{color:var(--mut);font-size:.82rem;padding:0 .4rem}
 .mf{display:flex;gap:.6rem;justify-content:flex-end;margin-top:1rem}
 .toast{position:fixed;bottom:1rem;inset-inline:1rem;max-width:420px;margin-inline:auto;background:var(--tx);color:var(--bg);padding:.6rem 1rem;border-radius:10px;text-align:center;z-index:50}
 .box{background:var(--chip);border-radius:8px;padding:.8rem;direction:ltr;text-align:left;font:12.5px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;user-select:all}
+table.lines{width:100%;border-collapse:collapse;margin-top:.8rem;font-size:.88rem}
+table.lines th{font-weight:600;color:var(--mut);text-align:start;padding:.3rem .35rem;white-space:nowrap}
+table.lines td{padding:.2rem .25rem;vertical-align:top}
+table.lines input,table.lines select{padding:.35rem .4rem;min-width:7rem}
+table.lines .w-acc{min-width:13rem}
+table.lines input.bad{outline:2px solid var(--err)}
+table.lines .num,table.lines td.num{text-align:end;font-variant-numeric:tabular-nums;min-width:6rem;white-space:nowrap}
+table.lines tfoot td{border-top:2px solid var(--bd);padding-top:.5rem;font-weight:600}
+.sub{padding:.4rem 1rem .8rem;background:var(--bg);border-bottom:1px solid var(--bd);overflow-x:auto}

@@ -35,8 +35,8 @@
 
   function create(sb, rootEl, doc) {
     doc = doc || root.document;
-    var NAV = [['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
-    var S = { view: 'accounts', rows: [], roleMap: {}, gform: null, user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
+    var NAV = [['entry', 'قيد جديد'], ['entries', 'القيود'], ['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
+    var S = { view: 'accounts', ent: null, entries: [], entLines: {}, openE: null, rev: null, parties: [], projects: [], ccs: [], rows: [], roleMap: {}, gform: null, user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
 
     function $(sel) { return rootEl.querySelector(sel); }
     function toast(msg) {
@@ -236,7 +236,7 @@
 
     function enterCompany(id) {
       S.company = S.companies.filter(function (c) { return c.id === id; })[0]; if (!S.company) return Promise.resolve();
-      store('company', id); S.q = ''; S.form = null; S.err = '';
+      store('company', id); S.q = ''; S.form = null; S.err = ''; S.ent = null;
       S.view = 'accounts';
       return loadAccounts().then(viewAccounts, function (e) { fail(e); viewAccounts(); });
     }
@@ -247,7 +247,7 @@
       return render();
     }
     function render() {
-      return ({ accounts: viewAccounts, roles: viewRoles, projects: viewList, cost_centers: viewList, parties: viewList }[S.view] || viewAccounts)();
+      return ({ entry: viewEntry, entries: viewEntries, accounts: viewAccounts, roles: viewRoles, projects: viewList, cost_centers: viewList, parties: viewList }[S.view] || viewAccounts)();
     }
     function go(v) {
       S.view = v; S.q = ''; S.err = ''; S.form = null; S.gform = null;
@@ -256,6 +256,18 @@
     function loadView() {
       var id = S.company.id;
       if (S.view === 'accounts') return loadAccounts();
+      if (S.view === 'entry') return Promise.all([loadAccounts(),
+        sb.from('projects').select('id,code,name,status').eq('company_id', id).order('code'),
+        sb.from('cost_centers').select('id,code,name,active').eq('company_id', id).order('code'),
+        sb.from('party_companies').select('party_id,active,parties(id,name,kind,active)').eq('company_id', id)]).then(function (r) {
+        for (var i = 1; i < 4; i++) if (r[i].error) throw r[i].error;
+        S.projects = r[1].data || []; S.ccs = r[2].data || [];
+        S.parties = (r[3].data || []).filter(function (x) { return x.active && x.parties && x.parties.active; }).map(function (x) { return x.parties; }).sort(function (a, b) { return a.name.localeCompare(b.name, 'ar'); });
+        if (!S.ent) S.ent = newEntry();
+      });
+      if (S.view === 'entries') return sb.from('journal_entries').select('*').eq('company_id', id).order('fiscal_year', { ascending: false }).order('entry_no', { ascending: false }).limit(300).then(function (r) {
+        if (r.error) throw r.error; S.entries = r.data || []; S.entLines = {}; S.openE = null;
+      });
       if (S.view === 'roles') return Promise.all([loadAccounts(), sb.from('account_roles').select('role_code,account_id').eq('company_id', id)]).then(function (r) {
         if (r[1].error) throw r[1].error;
         S.roleMap = {}; (r[1].data || []).forEach(function (x) { S.roleMap[x.role_code] = x.account_id; });
@@ -334,6 +346,12 @@
       if (act === 'theme') return theme();
       if (act === 'logout') return sb.auth.signOut().then(function () { S.user = null; S.company = null; store('company', ''); S.err = ''; route(); });
       if (act === 'nav') return go(id);
+      if (act === 'eline-add') { S.ent.lines.push(blankLine()); return viewEntry(); }
+      if (act === 'eline-del') { S.ent.lines.splice(+id, 1); return viewEntry(); }
+      if (act === 'eclear') { S.ent = newEntry(S.ent.date); return viewEntry(); }
+      if (act === 'eopen') return openEntry(id);
+      if (act === 'erev') { S.rev = { id: id, date: today(), reason: '', err: '' }; return renderRev(); }
+      if (act === 'revcancel') { S.rev = null; return viewEntries(); }
       if (act === 'gadd') return openG(null);
       if (act === 'gedit') return openG(id);
       if (act === 'gcancel') { S.gform = null; return render(); }
@@ -362,7 +380,8 @@
     }
 
     function onChange(ev) {
-      var el = ev.target, form = el.form; if (!form || form.getAttribute('data-form') !== 'acc') return;
+      var el = ev.target, form = el.form; if (form && form.getAttribute('data-form') === 'entry') return entryChange(el);
+      if (!form || form.getAttribute('data-form') !== 'acc') return;
       var f = readForm(form), prevType = S.form.account_type;
       var parent = f.parent_id ? byId(f.parent_id) : null;
       if (parent) f.account_type = parent.account_type;
@@ -375,6 +394,8 @@
       var form = ev.target, kind = form.getAttribute('data-form'); if (!kind) return;
       ev.preventDefault();
       if (kind === 'acc') return submitAccount(form);
+      if (kind === 'entry') return submitEntry();
+      if (kind === 'rev') return submitRev(form);
       if (kind === 'gen') return submitG(form);
       if (kind === 'roles') return saveRoles(form);
       if (kind === 'link') return linkParty(form);
@@ -391,6 +412,7 @@
     }
 
     function onInput(ev) {
+      if (ev.target.form && ev.target.form.getAttribute('data-form') === 'entry') { if (!entryInput(ev.target)) { var n = ev.target.name; if (n === 'desc' || n === 'manara_no') S.ent[n] = ev.target.value; } return; }
       if (ev.target.id === 'q') { S.q = ev.target.value; var pos = ev.target.selectionStart; render(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (e) { } } }
     }
 
@@ -553,6 +575,178 @@
       return sb.from('party_companies').insert({ party_id: pid, company_id: S.company.id }).then(function (r) {
         if (r.error) { fail(r.error); return render(); }
         S.err = ''; toast('تم الربط'); return loadView().then(render);
+      });
+    }
+
+    /* ---------- القيد اليومي ---------- */
+    function fmt(n) { return Number(n || 0).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+    function today() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+    function blankLine() { return { acc: '', account_id: '', party_id: '', payee: '', project_id: '', cost_center_id: '', desc: '', debit: '', credit: '' }; }
+    function newEntry(keepDate) { return { date: keepDate || today(), type: 'regular', desc: '', in_manara: false, manara_no: '', lines: [blankLine(), blankLine()], errs: [], warns: [] }; }
+    function postables() { return S.accounts.filter(function (a) { return a.is_postable && a.is_active; }).sort(natCmp); }
+    function resolveAcc(txt) {
+      txt = String(txt || '').trim(); if (!txt) return null;
+      var list = postables(), code = txt.split(/\s+/)[0];
+      return list.filter(function (a) { return a.code + ' ' + a.name === txt; })[0] || list.filter(function (a) { return a.code === code; })[0] || null;
+    }
+    function lineTotals() {
+      var d = 0, c = 0;
+      S.ent.lines.forEach(function (l) { d += Math.round((Number(l.debit) || 0) * 100); c += Math.round((Number(l.credit) || 0) * 100); });
+      return { d: d / 100, c: c / 100, diff: (d - c) / 100 };
+    }
+    function sel(name, list, cur, ph, dis, ln, f) {
+      return '<select data-ln="' + ln + '" data-f="' + f + '"' + (dis ? ' disabled' : '') + '><option value="">' + ph + '</option>' +
+        list.map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === cur ? ' selected' : '') + '>' + esc((x.code ? x.code + ' ' : '') + x.name) + '</option>'; }).join('') + '</select>';
+    }
+    function viewEntry() {
+      var E = S.ent, t = lineTotals(), canType = S.company.role === 'admin' || S.company.role === 'accountant';
+      var h = topbar() + '<div class="wrap"><h2>قيد يومية جديد</h2>';
+      if (!canWrite() && S.company.role !== 'entry') return rootEl.innerHTML = h + '<div class="empty">صلاحيتك عرض فقط.</div></div>';
+      if (E.warns.length) h += '<div class="errs" style="color:var(--warn);border-color:var(--warn)"><ul>' + E.warns.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>';
+      h += '<form data-form="entry" class="card"><datalist id="acclist">' + postables().map(function (a) { return '<option value="' + esc(a.code + ' ' + a.name) + '">'; }).join('') + '</datalist>' +
+        '<div class="g2"><div><label>تاريخ القيد</label><input type="date" name="date" value="' + esc(E.date) + '"></div>' +
+        '<div><label>نوع القيد</label><select name="type"><option value="regular">قيد عادي</option>' + (canType ? '<option value="opening"' + (E.type === 'opening' ? ' selected' : '') + '>قيد افتتاحي</option><option value="adjustment"' + (E.type === 'adjustment' ? ' selected' : '') + '>قيد تسوية</option>' : '') + '</select></div></div>' +
+        '<label>البيان</label><input name="desc" value="' + esc(E.desc) + '">' +
+        '<div class="g2"><div class="chk" style="align-self:end"><input type="checkbox" name="in_manara" id="e_man"' + (E.in_manara ? ' checked' : '') + '><label for="e_man" style="margin:0">اتسجل في المنارة</label></div>' +
+        (E.in_manara ? '<div><label>رقم القيد في المنارة</label><input name="manara_no" value="' + esc(E.manara_no) + '" dir="ltr"></div>' : '') + '</div>' +
+        '<div style="overflow-x:auto"><table class="lines"><thead><tr><th>الحساب</th><th>الطرف</th><th>المشروع</th><th>مركز التكلفة</th><th>بيان السطر</th><th>مدين</th><th>دائن</th><th></th></tr></thead><tbody>';
+      E.lines.forEach(function (l, i) {
+        var a = l.account_id ? byId(l.account_id) : null;
+        var parties = a ? S.parties.filter(function (p) { return a.party_kind === 'any' || p.kind === a.party_kind; }) : [];
+        var pd = !a || a.party_rule === 'forbidden', jd = !a || a.project_rule === 'forbidden', cd = !a || a.cost_center_rule === 'forbidden';
+        h += '<tr><td><input data-ln="' + i + '" data-f="acc" list="acclist" value="' + esc(l.acc) + '" placeholder="كود أو اسم الحساب" class="w-acc' + (l.acc && !l.account_id ? ' bad' : '') + '"></td>' +
+          '<td>' + sel('p', parties, l.party_id, a && a.party_rule === 'required' ? 'مطلوب' : '—', pd, i, 'party_id') +
+          (a && a.is_advance_account && !l.party_id ? '<input data-ln="' + i + '" data-f="payee" placeholder="اسم المستلم" value="' + esc(l.payee) + '">' : '') + '</td>' +
+          '<td>' + sel('j', S.projects.filter(function (x) { return x.status === 'active'; }), l.project_id, a && a.project_rule === 'required' ? 'مطلوب' : '—', jd, i, 'project_id') + '</td>' +
+          '<td>' + sel('c', S.ccs.filter(function (x) { return x.active; }), l.cost_center_id, a && a.cost_center_rule === 'required' ? 'مطلوب' : '—', cd, i, 'cost_center_id') + '</td>' +
+          '<td><input data-ln="' + i + '" data-f="desc" value="' + esc(l.desc) + '"></td>' +
+          '<td><input data-ln="' + i + '" data-f="debit" inputmode="decimal" dir="ltr" class="num" value="' + esc(l.debit) + '"></td>' +
+          '<td><input data-ln="' + i + '" data-f="credit" inputmode="decimal" dir="ltr" class="num" value="' + esc(l.credit) + '"></td>' +
+          '<td>' + (E.lines.length > 2 ? '<button type="button" class="sm danger" data-act="eline-del" data-id="' + i + '">✕</button>' : '') + '</td></tr>';
+      });
+      var ok = t.diff === 0 && t.d > 0;
+      h += '</tbody><tfoot><tr><td colspan="5"><button type="button" class="sm" data-act="eline-add">+ سطر</button> <span id="ediff" class="chip ' + (ok ? 'g' : 'w') + '">' + (ok ? 'متوازن' : 'الفرق ' + fmt(t.diff)) + '</span></td>' +
+        '<td class="num" id="etd">' + fmt(t.d) + '</td><td class="num" id="etc">' + fmt(t.c) + '</td><td></td></tr></tfoot></table></div>';
+      if (E.errs.length) h += '<div class="errs"><ul>' + E.errs.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul></div>';
+      h += '<div class="mf"><button type="button" data-act="eclear">تفريغ</button><button class="pri" type="submit" id="esave"' + (ok && !S.busy ? '' : ' disabled') + '>' + (S.busy ? 'جارٍ الحفظ…' : 'حفظ القيد') + '</button></div></form></div>';
+      rootEl.innerHTML = h;
+    }
+    function refreshTotals() {
+      var t = lineTotals(), ok = t.diff === 0 && t.d > 0, d = $('#ediff');
+      if (!d) return;
+      d.textContent = ok ? 'متوازن' : 'الفرق ' + fmt(t.diff); d.className = 'chip ' + (ok ? 'g' : 'w');
+      $('#etd').textContent = fmt(t.d); $('#etc').textContent = fmt(t.c); $('#esave').disabled = !(ok && !S.busy);
+    }
+    function entryInput(el) {
+      var E = S.ent, f = el.getAttribute('data-f'), i = el.getAttribute('data-ln');
+      if (i === null) return false;
+      var l = E.lines[+i]; if (!l) return true;
+      if (f === 'debit' || f === 'credit') {
+        l[f] = el.value; if (Number(el.value) > 0) { var o = f === 'debit' ? 'credit' : 'debit'; if (l[o] !== '') { l[o] = ''; var oe = rootEl.querySelector('[data-ln="' + i + '"][data-f="' + o + '"]'); if (oe) oe.value = ''; } }
+        refreshTotals();
+      } else if (f !== 'acc') l[f] = el.value;
+      return true;
+    }
+    function entryChange(el) {
+      var E = S.ent, f = el.getAttribute('data-f'), i = el.getAttribute('data-ln');
+      if (i === null) { if (el.name) { E[el.name] = el.type === 'checkbox' ? el.checked : el.value; if (el.name === 'in_manara') viewEntry(); } return; }
+      var l = E.lines[+i];
+      if (f === 'acc') {
+        var a = resolveAcc(el.value); l.acc = a ? a.code + ' ' + a.name : el.value; l.account_id = a ? a.id : '';
+        if (a) { if (a.party_rule === 'forbidden') l.party_id = ''; if (a.project_rule === 'forbidden') l.project_id = ''; if (a.cost_center_rule === 'forbidden') l.cost_center_id = '';
+          if (l.party_id && a.party_kind !== 'any') { var p = S.parties.filter(function (x) { return x.id === l.party_id; })[0]; if (!p || p.kind !== a.party_kind) l.party_id = ''; } }
+        else { l.party_id = l.project_id = l.cost_center_id = ''; }
+        viewEntry(); var nx = rootEl.querySelector('[data-ln="' + i + '"][data-f="' + (a && a.party_rule !== 'forbidden' ? 'party_id' : 'debit') + '"]'); if (nx) nx.focus();
+      } else { l[f] = el.value; if (f === 'party_id') viewEntry(); }
+    }
+    function validateEntry() {
+      var E = S.ent, e = [];
+      if (!E.date) e.push('تاريخ القيد مطلوب');
+      if (!String(E.desc).trim()) e.push('بيان القيد مطلوب');
+      if (E.in_manara === false && String(E.manara_no).trim()) e.push('رقم المنارة بدون تأشير «اتسجل في المنارة»');
+      E.lines.forEach(function (l, i) {
+        var n = 'السطر ' + (i + 1) + ': ', a = l.account_id ? byId(l.account_id) : null;
+        if (!a) return e.push(n + 'اختر حسابًا من القائمة');
+        var d = Number(l.debit) || 0, c = Number(l.credit) || 0;
+        if ((d > 0) === (c > 0)) e.push(n + 'ادخل مدين أو دائن (واحد فقط)');
+        if (Math.round(d * 100) / 100 !== d || Math.round(c * 100) / 100 !== c) e.push(n + 'المبلغ بحد أقصى خانتين عشريتين');
+        if (a.party_rule === 'required' && !l.party_id) e.push(n + 'الحساب ' + a.code + ' يتطلب طرفًا');
+        if (a.project_rule === 'required' && !l.project_id) e.push(n + 'الحساب ' + a.code + ' يتطلب مشروعًا');
+        if (a.cost_center_rule === 'required' && !l.cost_center_id) e.push(n + 'الحساب ' + a.code + ' يتطلب مركز تكلفة');
+        if (a.equipment_rule === 'required') e.push(n + 'الحساب ' + a.code + ' يتطلب معدة (شاشة المعدات لم تُضف بعد)');
+        if (a.is_advance_account && !l.party_id && !String(l.payee).trim()) e.push(n + 'الدفعة المقدمة بلا طرف تحتاج اسم المستلم');
+      });
+      var t = lineTotals(); if (t.diff !== 0) e.push('القيد غير متوازن: الفرق ' + fmt(t.diff));
+      return e;
+    }
+    function submitEntry() {
+      var E = S.ent; E.errs = validateEntry(); E.warns = [];
+      if (E.errs.length) return viewEntry();
+      var payload = { company_id: S.company.id, entry_date: E.date, description: String(E.desc).trim(), entry_type: E.type, voucher_type: 'journal',
+        in_manara: !!E.in_manara, manara_no: E.in_manara ? (String(E.manara_no).trim() || null) : null,
+        lines: E.lines.map(function (l) { return { account_id: l.account_id, debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
+          party_id: l.party_id || null, payee_name: l.payee ? String(l.payee).trim() : null, project_id: l.project_id || null,
+          cost_center_id: l.cost_center_id || null, description: l.desc || null }; }) };
+      S.busy = true; viewEntry();
+      return Promise.resolve(sb.rpc('post_entry', { p: payload })).then(function (r) {
+        S.busy = false;
+        if (r.error) { E.errs = [R.translateDbError(r.error)]; return viewEntry(); }
+        var d = r.data || {}, date = E.date;
+        S.ent = newEntry(date); S.ent.warns = d.warnings || [];
+        toast('تم القيد رقم ' + d.fiscal_year + '/' + d.entry_no); viewEntry();
+      }, function (e) { S.busy = false; E.errs = [R.translateDbError(e)]; viewEntry(); });
+    }
+
+    /* ---------- سجل القيود ---------- */
+    function viewEntries() {
+      var q = S.q.trim().toLowerCase(), w = S.company.role === 'admin' || S.company.role === 'accountant';
+      var reversed = {}; S.entries.forEach(function (e) { if (e.reverses_entry_id) reversed[e.reverses_entry_id] = true; });
+      var TL = { regular: 'عادي', opening: 'افتتاحي', reversal: 'عكسي', closing: 'إقفال', adjustment: 'تسوية' };
+      var rows = S.entries.filter(function (e) { return !q || (e.fiscal_year + '/' + e.entry_no + ' ' + e.description + ' ' + e.entry_date).toLowerCase().indexOf(q) >= 0; });
+      var h = topbar() + '<div class="wrap"><div class="bar"><h2 style="margin:0">سجل القيود</h2><span class="sp"></span><input type="search" id="q" placeholder="بحث بالرقم أو البيان" value="' + esc(S.q) + '"></div>';
+      if (S.err) h += '<div class="err">' + esc(S.err) + '</div>';
+      h += '<div class="tree">' + (rows.length ? rows.map(function (e) {
+        var open = S.openE === e.id, ls = S.entLines[e.id];
+        var r = '<div class="row' + (reversed[e.id] ? ' off' : '') + '"><span class="tg" data-act="eopen" data-id="' + esc(e.id) + '">' + (open ? '▾' : '◂') + '</span>' +
+          '<span class="code">' + esc(e.fiscal_year + '/' + e.entry_no) + '</span><span class="code" style="min-width:6.5rem">' + esc(e.entry_date) + '</span>' +
+          '<span class="nm">' + esc(e.description) + (e.entry_type !== 'regular' ? '<span class="chip">' + esc(TL[e.entry_type] || e.entry_type) + '</span>' : '') +
+          (reversed[e.id] ? '<span class="chip w">معكوس</span>' : '') + (e.in_manara ? '<span class="chip g">منارة' + (e.manara_no ? ' ' + esc(e.manara_no) : '') + '</span>' : '') + '</span>' +
+          (w && e.entry_type !== 'reversal' && !reversed[e.id] ? '<span class="act"><button class="sm" data-act="erev" data-id="' + esc(e.id) + '">عكس</button></span>' : '') + '</div>';
+        if (open) {
+          r += '<div class="sub">' + (ls ? '<table class="lines"><thead><tr><th>الحساب</th><th>الطرف</th><th>مشروع</th><th>مركز</th><th>البيان</th><th>مدين</th><th>دائن</th></tr></thead><tbody>' +
+            ls.map(function (l) { return '<tr><td>' + esc(l.account_code + ' ' + l.account_name) + '</td><td>' + esc(l.party_name || l.payee_name || '') + '</td><td>' + esc(l.project_code || '') + '</td><td>' + esc(l.cost_center_code || '') + '</td><td>' + esc(l.line_description || '') + '</td><td class="num">' + (Number(l.debit) ? fmt(l.debit) : '') + '</td><td class="num">' + (Number(l.credit) ? fmt(l.credit) : '') + '</td></tr>'; }).join('') +
+            '</tbody></table>' : '<span class="mut">جارٍ التحميل…</span>') + '</div>';
+        }
+        return r;
+      }).join('') : '<div class="empty">لا توجد قيود.</div>') + '</div>' + (S.entries.length >= 300 ? '<p class="mut">يعرض آخر 300 قيد.</p>' : '') + '</div>';
+      rootEl.innerHTML = h;
+      if (S.rev) renderRev();
+    }
+    function renderRev() {
+      var e = S.entries.filter(function (x) { return x.id === S.rev.id; })[0];
+      var h = '<div class="modal"><form class="card" data-form="rev"><h2>عكس القيد ' + esc(e.fiscal_year + '/' + e.entry_no) + '</h2>' +
+        '<p class="mut">بيتعمل قيد عكسي بنفس الأسطر، والقيد الأصلي يفضل كما هو.</p>' +
+        '<label>تاريخ القيد العكسي</label><input type="date" name="date" value="' + esc(S.rev.date) + '"><label>سبب العكس</label><input name="reason" value="' + esc(S.rev.reason) + '">' +
+        (S.rev.err ? '<div class="errs"><ul><li>' + esc(S.rev.err) + '</li></ul></div>' : '') +
+        '<div class="mf"><button type="button" data-act="revcancel">إلغاء</button><button class="pri" type="submit">عكس القيد</button></div></form></div>';
+      var old = $('.modal'); if (old) old.remove(); rootEl.insertAdjacentHTML('beforeend', h);
+    }
+    function submitRev(form) {
+      var date = form.elements.date.value, reason = form.elements.reason.value.trim(), id = S.rev.id;
+      S.rev.date = date; S.rev.reason = reason;
+      if (!date || !reason) { S.rev.err = 'التاريخ وسبب العكس مطلوبان'; return renderRev(); }
+      return Promise.resolve(sb.rpc('reverse_entry', { p_entry: id, p_date: date, p_reason: reason })).then(function (r) {
+        if (r.error) { S.rev.err = R.translateDbError(r.error); return renderRev(); }
+        S.rev = null; toast('تم عكس القيد'); return loadView().then(render);
+      }, function (e) { S.rev.err = R.translateDbError(e); renderRev(); });
+    }
+    function openEntry(id) {
+      if (S.openE === id) { S.openE = null; return viewEntries(); }
+      S.openE = id; viewEntries();
+      if (S.entLines[id]) return;
+      return sb.from('v_ledger').select('*').eq('entry_id', id).order('line_no').then(function (r) {
+        if (r.error) { fail(r.error); return viewEntries(); }
+        S.entLines[id] = r.data || []; viewEntries();
       });
     }
 
