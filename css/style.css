@@ -115,3 +115,8 @@ table.rp tr.chk td{color:var(--mut);font-size:.85rem}
   .sheetwrap{border:0;overflow:visible}
   table.sheet th{position:static}
 }
+.itm{border:1px solid var(--bd);border-radius:10px;padding:.6rem;margin:.5rem 0;background:var(--bg)}
+.itmhead{display:grid;grid-template-columns:auto 1.2fr 1.4fr 9rem auto;gap:.4rem;align-items:center}
+.itmdims{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.4rem;align-items:center}
+.itmdims select{width:auto;min-width:9rem;flex:1}
+@media(max-width:700px){.itmhead{grid-template-columns:1fr 1fr}}

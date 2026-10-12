@@ -453,7 +453,7 @@
     ];
     function viewRoles() {
       var post = S.accounts.filter(function (a) { return a.is_postable && a.is_active; }).sort(natCmp);
-      var h = topbar() + '<div class="wrap"><h2>ربط الأدوار بالحسابات</h2><p class="mut">الأدوار دي بتستخدمها القوالب السريعة (فاتورة، سند صرف…) لتعرف تقيّد على أي حساب. الحسابات المقترحة بتظهر أولًا.</p>';
+      var h = topbar() + '<div class="wrap"><h2>ربط الأدوار بالحسابات</h2><p class="mut">ما تنشئش حسابات علشان الربط؛ الربط بيشاور على حساباتك الحقيقية. الفواتير والسندات بتلاقي حسابات العملاء والموردين وضريبة المدخلات والمخرجات <b>تلقائيًا</b> من إعدادات الحساب نفسه (رقابة + نوع الطرف، ودور الضريبة). الاختيار هنا مطلوب فقط لو عندك أكتر من حساب مناسب لنفس الدور. باقي الأدوار لوحدات جاية.</p>';
       if (S.err) h += '<div class="err">' + esc(S.err) + '</div>';
       h += '<form data-form="roles" class="card">';
       ROLES.forEach(function (r) {
