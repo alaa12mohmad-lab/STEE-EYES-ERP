@@ -77,26 +77,24 @@
 
   function create(ctx) {
     var S = ctx.S, sb = ctx.sb, esc = ctx.esc, rootEl = ctx.rootEl;
-    var D = { loaded: false, roles: {}, parties: [], projects: [], ccs: [], equip: [], msg: null, err: '', busy: false, modal: null };
+    var D = { loaded: false, parties: [], projects: [], ccs: [], equip: [], msg: null, err: '', busy: false, modal: null };
     var I = null, V = null;
 
     /* ---------- تحميل ---------- */
     function load() {
       var id = S.company.id;
       return Promise.all([
-        sb.from('account_roles').select('role_code,account_id').eq('company_id', id),
         sb.from('projects').select('id,code,name,status').eq('company_id', id).order('code'),
         sb.from('cost_centers').select('id,code,name,active').eq('company_id', id).order('code'),
         sb.from('party_companies').select('party_id,active,parties(id,name,kind,active,vat_number)').eq('company_id', id),
         sb.from('equipment').select('id,code,name,sold_date').eq('owner_company_id', id).order('code')
       ]).then(function (r) {
-        for (var i = 0; i < 4; i++) if (r[i].error) throw r[i].error;
-        D.roles = {}; (r[0].data || []).forEach(function (x) { D.roles[x.role_code] = x.account_id; });
-        D.projects = (r[1].data || []).filter(function (p) { return p.status === 'active'; });
-        D.ccs = (r[2].data || []).filter(function (c) { return c.active; });
-        D.parties = (r[3].data || []).filter(function (x) { return x.active && x.parties && x.parties.active; }).map(function (x) { return x.parties; })
+        for (var i = 0; i < 3; i++) if (r[i].error) throw r[i].error;
+        D.projects = (r[0].data || []).filter(function (p) { return p.status === 'active'; });
+        D.ccs = (r[1].data || []).filter(function (c) { return c.active; });
+        D.parties = (r[2].data || []).filter(function (x) { return x.active && x.parties && x.parties.active; }).map(function (x) { return x.parties; })
           .sort(function (a, b) { return a.name.localeCompare(b.name, 'ar'); });
-        D.equip = r[4].error ? [] : (r[4].data || []).filter(function (e) { return !e.sold_date; });
+        D.equip = r[3].error ? [] : (r[3].data || []).filter(function (e) { return !e.sold_date; });
         D.loaded = true; D.err = '';
       });
     }
@@ -127,23 +125,27 @@
       if (D.msg) h += '<div class="okbox">' + D.msg.map(esc).join('<br>') + '</div>';
       return h;
     }
-    /* الحسابات الأربعة تُكتشف تلقائيًا من إعدادات الحساب نفسه (رقابة + نوع الطرف، ودور الضريبة).
-       جدول "ربط الأدوار" يُستخدم فقط لو فيه أكثر من حساب مناسب (للحسم). */
+    /* الحسابات اللي هيتأثر بيها القيد (الموردين/العملاء/الضريبة) بتظهر في النموذج نفسه وتتغيّر بإيدك.
+       بنقترح الحساب تلقائيًا من إعداداته لو فيه حساب واحد مناسب بس. مفيش جدول ربط محفوظ. */
     var ROLE_DEF = {
-      ap: { code: 'ap_control', name: 'الموردين (حساب رقابة، نوع الطرف مورد)', pick: function (a) { return a.is_control_account && a.party_kind === 'supplier'; } },
-      ar: { code: 'ar_control', name: 'العملاء (حساب رقابة، نوع الطرف عميل)', pick: function (a) { return a.is_control_account && a.party_kind === 'customer'; } },
-      vin: { code: 'vat_input', name: 'ضريبة المدخلات (دور الضريبة = مدخلات)', pick: function (a) { return a.vat_role === 'input'; } },
-      vout: { code: 'vat_output', name: 'ضريبة المخرجات (دور الضريبة = مخرجات)', pick: function (a) { return a.vat_role === 'output'; } }
+      ap: { name: 'الموردين (حساب رقابة، نوع الطرف مورد)', pick: function (a) { return a.is_control_account && a.party_kind === 'supplier'; } },
+      ar: { name: 'العملاء (حساب رقابة، نوع الطرف عميل)', pick: function (a) { return a.is_control_account && a.party_kind === 'customer'; } },
+      vin: { name: 'ضريبة المدخلات (دور الضريبة = مدخلات)', pick: function (a) { return a.vat_role === 'input'; } },
+      vout: { name: 'ضريبة المخرجات (دور الضريبة = مخرجات)', pick: function (a) { return a.vat_role === 'output'; } }
     };
-    function resolveRole(k) {
-      var d = ROLE_DEF[k], c = postables().filter(d.pick);
-      if (c.length === 1) return { id: c[0].id };
-      if (!c.length) return { err: 'مفيش حساب مناسب لـ ' + d.name + ' — عدّل إعدادات الحساب الموجود من شاشة الحسابات' };
-      var chosen = c.filter(function (x) { return x.id === D.roles[d.code]; })[0];
-      return chosen ? { id: chosen.id } : { err: 'فيه أكثر من حساب مناسب لـ ' + d.name + ' (' + c.map(function (x) { return x.code; }).join('، ') + ') — اختر واحد من "ربط الأدوار"' };
+    function candidates(k) { return postables().filter(ROLE_DEF[k].pick); }
+    function defaultAcc(k, cur) { var c = candidates(k); if (cur && c.some(function (x) { return x.id === cur; })) return cur; return c.length === 1 ? c[0].id : ''; }
+    function accSelect(k, attr, val, label, optional) {
+      var c = candidates(k);
+      if (!c.length) return '<div><label>' + label + '</label><div class="mut" style="font-size:.8rem;color:var(--warn)">مفيش حساب مناسب في الشجرة — ' + esc(ROLE_DEF[k].name) + '. عدّل إعدادات الحساب من شاشة الحسابات.</div></div>';
+      return '<div><label>' + label + '</label><select ' + attr + '>' + (c.length > 1 || optional ? '<option value="">— اختر —</option>' : '') + c.map(function (x) { return opt(x.id, x.code + ' ' + x.name, x.id === val); }).join('') + '</select></div>';
     }
-    function rolesMissing(need) { var out = []; need.forEach(function (k) { var r = resolveRole(k); if (r.err) out.push(r.err); }); return out; }
-    function roleIds() { var o = {}; ['ap', 'ar', 'vin', 'vout'].forEach(function (k) { o[k] = resolveRole(k).id; }); return o; }
+    /* need: [['ap', selectedId], ...] ; يرجّع أخطاء لو ناقص */
+    function acctErrors(need) {
+      var out = [];
+      need.forEach(function (n) { if (!n[1]) out.push('اختر حساب ' + ROLE_DEF[n[0]].name.split(' (')[0] + (candidates(n[0]).length ? '' : ' — مفيش حساب مناسب في الشجرة، عدّل إعدادات الحساب من شاشة الحسابات')); });
+      return out;
+    }
 
     /* ---------- المرفقات ---------- */
     function hex(buf) { var a = new Uint8Array(buf), s = ''; for (var i = 0; i < a.length; i++) s += ('0' + a[i].toString(16)).slice(-2); return s; }
@@ -404,9 +406,9 @@
       return { net: net, vat: r2(vat), total: r2(net + vat) };
     }
     function invForm() {
-      var f = I.f, miss = rolesMissing(f.kind === 'purchase' ? ['ap', 'vin'] : ['ar', 'vout']), t = invTotals(f), p = findParty(f.party, f.kind);
+      var f = I.f, pu = f.kind === 'purchase', k = pu ? 'ap' : 'ar', vk = pu ? 'vin' : 'vout', t = invTotals(f), p = findParty(f.party, f.kind);
+      f.ctl = defaultAcc(k, f.ctl); f.vatAcc = defaultAcc(vk, f.vatAcc);
       var h = '<form class="card" data-form="dc-inv" data-docs="inv">';
-      if (miss.length) h += '<div class="errs">' + miss.map(esc).join('<br>') + '</div>';
       h += '<datalist id="dl_pp">' + partiesOf(f.kind).map(function (x) { return '<option value="' + esc(x.name) + '">'; }).join('') + '</datalist>' +
         '<div class="g5"><div><label>نوع الفاتورة</label><select data-ff="kind">' + opt('purchase', 'مشتريات (من مورد)', f.kind === 'purchase') + opt('sales', 'مبيعات (لعميل)', f.kind === 'sales') + '</select></div>' +
         '<div><label>' + (f.kind === 'purchase' ? 'المورد' : 'العميل') + '</label><input data-ff="party" list="dl_pp" value="' + esc(f.party) + '"><div class="mut" id="pinfo" style="font-size:.78rem">' + partyInfo(p, f.kind) + '</div></div>' +
@@ -414,6 +416,7 @@
         '<div><label>تاريخ الفاتورة</label><input type="date" data-ff="date" value="' + esc(f.date) + '"></div>' +
         '<div><label>تاريخ الاستحقاق</label><input type="date" data-ff="due" value="' + esc(f.due) + '"></div>' +
         '<div><label>تاريخ القيد (اختياري)</label><input type="date" data-ff="edate" value="' + esc(f.edate) + '"></div></div>' +
+        '<div class="g5">' + accSelect(k, 'data-ff="ctl"', f.ctl, pu ? 'حساب الموردين (المستحق للمورد)' : 'حساب العملاء (المستحق على العميل)') + accSelect(vk, 'data-ff="vatAcc"', f.vatAcc, pu ? 'حساب ضريبة المدخلات' : 'حساب ضريبة المخرجات') + '</div>' +
         '<fieldset><legend>توزيع الفاتورة على الحسابات (' + (f.kind === 'purchase' ? 'مصروف / أصل' : 'إيراد') + ')</legend>' + distHtml(f.dist, f.kind, 'inv') + '</fieldset>' +
         '<div class="g5"><div><label>صافي الفاتورة</label><input id="t_net" disabled value="' + fmt(t.net) + '"></div>' +
         '<div><label>الضريبة (15% تلقائي — عدّلها لو مختلفة)</label><input data-ff="vat" class="num" dir="ltr" inputmode="decimal" value="' + esc(f.vatEdited ? f.vat : (t.vat ? t.vat.toFixed(2) : '')) + '" placeholder="0.00"></div>' +
@@ -436,8 +439,7 @@
     function doc() { return ctx.doc || root.document; }
 
     function submitInvoice() {
-      var f = I.f, errs = [], miss = rolesMissing(f.kind === 'purchase' ? ['ap', 'vin'] : ['ar', 'vout']);
-      if (miss.length) errs.push(miss.join(' — '));
+      var f = I.f, errs = [], pu = f.kind === 'purchase';
       var p = findParty(f.party, f.kind); if (!p) errs.push('اختر ' + (f.kind === 'purchase' ? 'المورد' : 'العميل') + ' من القائمة');
       if (!String(f.no).trim()) errs.push('رقم الفاتورة مطلوب');
       if (!f.date) errs.push('تاريخ الفاتورة مطلوب');
@@ -445,6 +447,7 @@
       var edate = f.edate || f.date; if (f.date && edate < f.date) errs.push('تاريخ القيد قبل تاريخ الفاتورة');
       var dist = readDist(f.dist, f.kind, errs, 'الفاتورة'); if (!dist.length && !errs.length) errs.push('أضف بندًا واحدًا على الأقل');
       var t = invTotals(f), vat = t.vat; if (f.vatEdited) { var vn = num(f.vat); if (vn === null) vn = 0; if (isNaN(vn) || vn < 0) errs.push('الضريبة غير صحيحة'); else vat = r2(vn); }
+      acctErrors([[pu ? 'ap' : 'ar', f.ctl]].concat(vat > 0 ? [[pu ? 'vin' : 'vout', f.vatAcc]] : [])).forEach(function (m) { errs.push(m); });
       if (p && f.kind === 'purchase' && vat > 0 && !p.vat_number) errs.push('المورد بدون رقم ضريبي: لا يمكن احتساب ضريبة مدخلات');
       if (f.kind === 'purchase' && !f.files.length) errs.push('المرفق إجباري على فواتير المشتريات');
       if (f.manara && !String(f.manaraNo).trim()) errs.push('رقم المنارة مطلوب');
@@ -452,7 +455,7 @@
       D.err = ''; D.busy = true; viewInvoices();
       var ff = Object.assign({}, f, { partyId: p.id, dist: dist, vat: vat, edate: edate, desc: String(f.desc).trim() || ((f.kind === 'purchase' ? 'فاتورة مشتريات ' : 'فاتورة مبيعات ') + String(f.no).trim() + ' - ' + p.name) });
       return uploadAll(f.files).then(function (ids) {
-        var payload = buildInvoice(S.company.id, ff, roleIds(), ids);
+        var payload = buildInvoice(S.company.id, ff, { ap: f.ctl, ar: f.ctl, vin: f.vatAcc, vout: f.vatAcc }, ids);
         return Promise.resolve(sb.rpc('post_entry', { p: payload }));
       }).then(function (r) {
         D.busy = false;
@@ -516,14 +519,15 @@
     }
     function allocSum() { var s = 0; Object.keys(V.alloc).forEach(function (k) { s = r2(s + (Number(V.alloc[k]) || 0)); }); return s; }
     function vchForm() {
-      var f = V.f, cashAccs = postables().filter(function (a) { return a.is_cash_account; }), isE = f.type === 'pay_expense', miss = isE ? [] : rolesMissing([f.type === 'pay_supplier' ? 'ap' : 'ar']);
+      var f = V.f, cashAccs = postables().filter(function (a) { return a.is_cash_account; }), isE = f.type === 'pay_expense', ck = f.type === 'pay_supplier' ? 'ap' : 'ar';
+      if (!isE) f.ctl = defaultAcc(ck, f.ctl);
       var h = '<form class="card" data-form="dc-vch" data-docs="vch">';
-      if (miss.length) h += '<div class="errs">' + miss.map(esc).join('<br>') + '</div>';
       h += '<datalist id="dl_vp">' + (isE ? '' : partiesOf(vKind(f.type)).map(function (x) { return '<option value="' + esc(x.name) + '">'; }).join('')) + '</datalist><div class="g5">' +
         '<div><label>نوع السند</label><select data-vf="type">' + Object.keys(VCH_AR).map(function (k) { return opt(k, VCH_AR[k], f.type === k); }).join('') + '</select></div>' +
         '<div><label>التاريخ</label><input type="date" data-vf="date" value="' + esc(f.date) + '"></div>' +
         (isE ? '' : '<div><label>' + (f.type === 'pay_supplier' ? 'المورد' : 'العميل') + '</label><input data-vf="party" list="dl_vp" value="' + esc(f.party) + '"></div>') +
         (isE ? '<div><label>المستلم (اسم)</label><input data-vf="payee" value="' + esc(f.payee || '') + '"></div>' : '') + '<div><label>' + (f.type === 'recv_customer' ? 'يُودَع في (صندوق/بنك)' : 'يُصرف من (صندوق/بنك)') + '</label><select data-vf="cash"><option value="">— اختر —</option>' + cashAccs.map(function (a) { return opt(a.id, a.code + ' ' + a.name, a.id === f.cash); }).join('') + '</select></div>' +
+        (isE ? '' : accSelect(ck, 'data-vf="ctl"', f.ctl, f.type === 'pay_supplier' ? 'حساب الموردين' : 'حساب العملاء')) +
         (isE ? '' : '<div><label>المبلغ</label><input data-vf="amount" class="num" dir="ltr" inputmode="decimal" value="' + esc(f.amount) + '"></div>') + '</div>';
       if (isE) h += '<fieldset><legend>المصروفات المدفوعة</legend>' + distHtml(f.dist, 'purchase', 'vch') + '</fieldset>';
       else h += '<fieldset id="allocbox"><legend>تخصيص على الفواتير المفتوحة</legend>' + allocHtml() + '</fieldset>';
@@ -555,7 +559,7 @@
 
     function submitVoucher() {
       var f = V.f, errs = [], isE = f.type === 'pay_expense', p = null, dist = [];
-      if (!isE) { var miss = rolesMissing([f.type === 'pay_supplier' ? 'ap' : 'ar']); if (miss.length) errs.push(miss.join(' — ')); p = findParty(f.party, vKind(f.type)); if (!p) errs.push('اختر الطرف من القائمة'); }
+      if (!isE) { acctErrors([[f.type === 'pay_supplier' ? 'ap' : 'ar', f.ctl]]).forEach(function (m) { errs.push(m); }); p = findParty(f.party, vKind(f.type)); if (!p) errs.push('اختر الطرف من القائمة'); }
       if (!f.date) errs.push('التاريخ مطلوب');
       var cash = acc(f.cash); if (!cash) errs.push('اختر حساب الصندوق/البنك');
       var amount = 0;
@@ -579,7 +583,7 @@
       D.err = ''; D.busy = true; viewVouchers();
       var desc = String(f.desc).trim() || (f.type === 'pay_supplier' ? 'سداد للمورد ' + p.name : f.type === 'recv_customer' ? 'تحصيل من العميل ' + p.name : 'سند صرف مصروفات');
       var ff = { type: f.type, date: f.date, partyId: p && p.id, cash: cash, amount: amount, desc: desc, manara: f.manara, manaraNo: f.manaraNo, allocs: allocs, dist: dist };
-      return uploadAll(f.files).then(function (ids) { return sb.rpc('post_entry', { p: buildVoucher(S.company.id, ff, roleIds(), ids) }); }).then(function (r) {
+      return uploadAll(f.files).then(function (ids) { return sb.rpc('post_entry', { p: buildVoucher(S.company.id, ff, { ap: f.ctl, ar: f.ctl }, ids) }); }).then(function (r) {
         D.busy = false; if (r.error) throw r.error;
         var d = r.data, msg = ['تم حفظ السند — قيد ' + d.fiscal_year + '/' + d.entry_no];
         (d.warnings || []).forEach(function (w) { msg.push(w); });
@@ -615,8 +619,8 @@
         D.err = bad.length ? 'اتتجاهلت: ' + bad.join('، ') : ''; return S.view === 'invoices' ? viewInvoices() : viewVouchers();
       }
       var ff = el.getAttribute('data-ff'), vf = el.getAttribute('data-vf');
-      if (ff === 'kind') { I.f.kind = el.value; I.f.party = ''; I.f.dist = [blankItem()]; I.f.vatEdited = false; I.f.vat = ''; I.f.files = I.f.files; return viewInvoices(); }
-      if (vf === 'type') { var old = V.f; V.f.type = el.value; V.f.party = ''; V.alloc = {}; V.open = []; V.f.dist = [blankItem()]; return viewVouchers(); }
+      if (ff === 'kind') { I.f.kind = el.value; I.f.party = ''; I.f.ctl = ''; I.f.vatAcc = ''; I.f.dist = [blankItem()]; I.f.vatEdited = false; I.f.vat = ''; I.f.files = I.f.files; return viewInvoices(); }
+      if (vf === 'type') { var old = V.f; V.f.type = el.value; V.f.party = ''; V.f.ctl = ''; V.alloc = {}; V.open = []; V.f.dist = [blankItem()]; return viewVouchers(); }
       if (vf === 'party' || vf === 'date') { V.f[vf] = el.value; V.alloc = {}; return loadOpenInv().then(viewVouchers, function (e) { D.err = ctx.translate(e); viewVouchers(); }); }
       if (el.hasAttribute('data-if') || el.hasAttribute('data-sf')) return itemInput(el);
       input(el);

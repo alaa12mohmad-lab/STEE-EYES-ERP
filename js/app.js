@@ -35,7 +35,7 @@
 
   function create(sb, rootEl, doc) {
     doc = doc || root.document;
-    var NAV = [['entry', 'قيد اليومية'], ['entries', 'سجل القيود'], ['invoices', 'الفواتير'], ['vouchers', 'السندات'], ['reports', 'القوائم المالية'], ['accounts', 'الحسابات'], ['roles', 'ربط الأدوار'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
+    var NAV = [['entry', 'قيد اليومية'], ['entries', 'سجل القيود'], ['invoices', 'الفواتير'], ['vouchers', 'السندات'], ['reports', 'القوائم المالية'], ['accounts', 'الحسابات'], ['projects', 'المشاريع'], ['cost_centers', 'مراكز التكلفة'], ['parties', 'الأطراف']];
     var rp, dc;
     var S = { view: 'accounts', cur: undefined, pages: [], pg: { id: null, no: null, entries: [], reversed: {} }, reg: null, hl: null, ent: null, entries: [], entLines: {}, openE: null, rev: null, parties: [], projects: [], ccs: [], rows: [], roleMap: {}, gform: null, user: null, companies: null, company: null, accounts: [], moved: {}, open: {}, q: '', form: null, formId: null, formErrs: [], busy: false, err: '' };
 
@@ -248,7 +248,7 @@
       return render();
     }
     function render() {
-      return ({ entry: viewEntry, entries: viewEntries, reports: function () { rp.init(); rp.view(); }, invoices: function () { dc.view('invoices'); }, vouchers: function () { dc.view('vouchers'); }, accounts: viewAccounts, roles: viewRoles, projects: viewList, cost_centers: viewList, parties: viewList }[S.view] || viewAccounts)();
+      return ({ entry: viewEntry, entries: viewEntries, reports: function () { rp.init(); rp.view(); }, invoices: function () { dc.view('invoices'); }, vouchers: function () { dc.view('vouchers'); }, accounts: viewAccounts, projects: viewList, cost_centers: viewList, parties: viewList }[S.view] || viewAccounts)();
     }
     function go(v) {
       S.view = v; S.q = ''; S.err = ''; S.form = null; S.gform = null;
@@ -269,10 +269,6 @@
         if (S.cur === undefined) S.cur = null;
         if (!S.ent) S.ent = loadDraft(S.cur) || newSheet();
         return loadPageContent(S.cur);
-      });
-      if (S.view === 'roles') return Promise.all([loadAccounts(), sb.from('account_roles').select('role_code,account_id').eq('company_id', id)]).then(function (r) {
-        if (r[1].error) throw r[1].error;
-        S.roleMap = {}; (r[1].data || []).forEach(function (x) { S.roleMap[x.role_code] = x.account_id; });
       });
       if (S.view === 'projects' || S.view === 'cost_centers') return sb.from(S.view).select('*').eq('company_id', id).order('code').then(function (r) {
         if (r.error) throw r.error; S.rows = r.data || [];
@@ -415,7 +411,6 @@
       if (kind.indexOf('dc-') === 0) return dc.submit(form);
       if (kind === 'regf') { readRegF(form); S.reg.p = 0; S.err = ''; return runRegister().then(viewEntries, function (e) { fail(e); viewEntries(); }); }
       if (kind === 'gen') return submitG(form);
-      if (kind === 'roles') return saveRoles(form);
       if (kind === 'link') return linkParty(form);
       if (kind === 'login') {
         if (S.busy) return;
@@ -435,52 +430,6 @@
       if (ev.target.id === 'q') { S.q = ev.target.value; var pos = ev.target.selectionStart; render(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (e) { } } }
     }
 
-    /* ---------- ربط الأدوار ---------- */
-    var ROLES = [
-      ['ar_control', 'العملاء (رقابة)', function (a) { return a.is_control_account; }],
-      ['ap_control', 'الموردون (رقابة)', function (a) { return a.is_control_account; }],
-      ['cash', 'الصندوق', function (a) { return a.is_cash_account; }],
-      ['bank', 'البنك', function (a) { return a.is_cash_account; }],
-      ['custody', 'العهد', function (a) { return a.account_type === 'asset'; }],
-      ['vat_input', 'ضريبة المدخلات', function (a) { return a.vat_role === 'input'; }],
-      ['vat_output', 'ضريبة المخرجات', function (a) { return a.vat_role === 'output'; }],
-      ['vat_payable', 'ضريبة القيمة المضافة المستحقة', function (a) { return a.account_type === 'liability'; }],
-      ['payroll_payable', 'رواتب مستحقة', function (a) { return a.account_type === 'liability'; }],
-      ['customer_advance', 'فلوس واصلة من العميل (دفعات مقدمة)', function (a) { return a.is_advance_account; }],
-      ['supplier_advance_unregistered', 'دفعات مقدمة لغير المسجلين', function (a) { return a.is_advance_account; }],
-      ['depreciation_expense', 'مصروف الإهلاك', function (a) { return a.account_type === 'expense'; }],
-      ['accumulated_depreciation', 'مجمع الإهلاك', function (a) { return a.account_type === 'asset'; }]
-    ];
-    function viewRoles() {
-      var post = S.accounts.filter(function (a) { return a.is_postable && a.is_active; }).sort(natCmp);
-      var h = topbar() + '<div class="wrap"><h2>ربط الأدوار بالحسابات</h2><p class="mut">ما تنشئش حسابات علشان الربط؛ الربط بيشاور على حساباتك الحقيقية. الفواتير والسندات بتلاقي حسابات العملاء والموردين وضريبة المدخلات والمخرجات <b>تلقائيًا</b> من إعدادات الحساب نفسه (رقابة + نوع الطرف، ودور الضريبة). الاختيار هنا مطلوب فقط لو عندك أكتر من حساب مناسب لنفس الدور. باقي الأدوار لوحدات جاية.</p>';
-      if (S.err) h += '<div class="err">' + esc(S.err) + '</div>';
-      h += '<form data-form="roles" class="card">';
-      ROLES.forEach(function (r) {
-        var cur = S.roleMap[r[0]] || '', sug = post.filter(r[2]), rest = post.filter(function (a) { return !r[2](a); });
-        function o(a) { return '<option value="' + esc(a.id) + '"' + (a.id === cur ? ' selected' : '') + '>' + esc(a.code + ' ' + a.name) + '</option>'; }
-        h += '<label>' + esc(r[1]) + '</label><select name="' + r[0] + '"' + (canWrite() ? '' : ' disabled') + '><option value="">— غير مربوط —</option>' +
-          (sug.length ? '<optgroup label="مقترحة">' + sug.map(o).join('') + '</optgroup>' : '') +
-          '<optgroup label="باقي الحسابات">' + rest.map(o).join('') + '</optgroup></select>';
-      });
-      if (canWrite()) h += '<div class="mf"><button class="pri" type="submit">حفظ الربط</button></div>';
-      rootEl.innerHTML = h + '</form></div>';
-    }
-    function saveRoles(form) {
-      var rows = [], clear = [];
-      ROLES.forEach(function (r) {
-        var v = form.elements[r[0]].value;
-        if (v) rows.push({ company_id: S.company.id, role_code: r[0], account_id: v }); else if (S.roleMap[r[0]]) clear.push(r[0]);
-      });
-      var ops = [];
-      if (rows.length) ops.push(sb.from('account_roles').upsert(rows, { onConflict: 'company_id,role_code' }));
-      clear.forEach(function (c) { ops.push(sb.from('account_roles').delete().eq('company_id', S.company.id).eq('role_code', c)); });
-      return Promise.all(ops).then(function (rs) {
-        var bad = rs.filter(function (x) { return x.error; })[0];
-        if (bad) { fail(bad.error); return viewRoles(); }
-        S.err = ''; toast('تم حفظ الربط'); return loadView().then(viewRoles);
-      }, function (e) { fail(e); viewRoles(); });
-    }
 
     /* ---------- قوائم بسيطة: مشاريع / مراكز تكلفة / أطراف ---------- */
     var PARTY_KIND = { customer: 'عميل', supplier: 'مورد', employee: 'موظف', partner: 'شريك' };
