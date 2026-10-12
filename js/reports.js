@@ -101,13 +101,8 @@
     function rpc(fn, args) {
       return Promise.resolve(sb.rpc(fn, args)).then(function (r) { if (r.error) throw r.error; return r.data || []; });
     }
-    function run() {
-      var f = R.f, cid = S.company.id, t = f.rtype;
-      R.err = ''; R.model = null;
-      if (!f.to || (t !== 'bs' && !f.from)) { R.err = 'حدد التاريخ.'; view(); return Promise.resolve(); }
-      if (t !== 'bs' && f.from > f.to) { R.err = 'تاريخ البداية بعد النهاية.'; view(); return Promise.resolve(); }
-      var period = t === 'bs' ? 'كما في ' + f.to : 'من ' + f.from + ' إلى ' + f.to;
-      var p;
+    function one(c, a) {
+      var f = R.f, cid = c.id, t = f.rtype, p;
       if (t === 'tb') p = rpc('fn_trial_balance', { p_company: cid, p_from: f.from, p_to: f.to }).then(function (d) { return buildTB(d, f); });
       else if (t === 'is') p = rpc('fn_income_statement', f.compare ? { p_company: cid, p_from: f.from, p_to: f.to, p_prev_from: shiftYear(f.from), p_prev_to: shiftYear(f.to) } : { p_company: cid, p_from: f.from, p_to: f.to })
         .then(function (d) { return buildLevels(d, f, f.compare); });
@@ -127,33 +122,100 @@
       });
       else if (t === 'eq') p = rpc('fn_equity_changes', { p_company: cid, p_from: f.from, p_to: f.to }).then(buildEQ);
       else if (t === 'st') {
-        var a = findAcc(f.acc); if (!a) { R.err = 'اختر الحساب من القائمة (حساب فرعي قابل للترحيل).'; view(); return Promise.resolve(); }
-        period += ' — ' + a.code + ' ' + a.name;
-        p = Promise.all([rpc('fn_trial_balance', { p_company: cid, p_from: f.from, p_to: f.to }),
-          sb.from('v_ledger').select('entry_date,fiscal_year,entry_no,line_no,description,line_description,party_name,payee_name,project_code,debit,credit')
-            .eq('account_id', a.id).gte('entry_date', f.from).lte('entry_date', f.to)
-            .order('entry_date').order('fiscal_year').order('entry_no').order('line_no').range(0, 4999)]).then(function (r) {
-          if (r[1].error) throw r[1].error;
-          var op = 0; r[0].forEach(function (x) { if (x.account_id === a.id) op = Number(x.opening_balance); });
-          var bal = op, td = 0, tc = 0, rows = [row('sub', [T(''), T(''), T('رصيد أول المدة'), T(''), T(''), N(null), N(null), N(op)])];
-          var ls = r[1].data || [];
-          ls.forEach(function (l) {
-            var d = Number(l.debit), c = Number(l.credit); bal += d - c; td += d; tc += c;
-            rows.push(row('', [T(l.entry_date), T(l.fiscal_year + '/' + l.entry_no), T([l.description, l.line_description].filter(Boolean).join(' — ')),
-              T(l.party_name || l.payee_name || ''), T(l.project_code || ''), N(d || null), N(c || null), N(bal)]));
+        var accP = c.id === S.company.id ? Promise.resolve(a) :
+          Promise.resolve(sb.from('accounts').select('id,code,name').eq('company_id', cid).eq('code', a.code)).then(function (r) { if (r.error) throw r.error; return (r.data || [])[0] || null; });
+        p = accP.then(function (ac) {
+          if (!ac) return { cols: ['التاريخ', 'رقم القيد', 'البيان', 'الطرف', 'مشروع', 'مدين', 'دائن', 'الرصيد'], nums: [5, 6, 7], rows: [], notes: [{ t: 'الحساب ' + a.code + ' غير موجود في هذه الشركة.', bad: true }] };
+          return Promise.all([rpc('fn_trial_balance', { p_company: cid, p_from: f.from, p_to: f.to }),
+            sb.from('v_ledger').select('entry_date,fiscal_year,entry_no,line_no,description,line_description,party_name,payee_name,project_code,debit,credit')
+              .eq('account_id', ac.id).gte('entry_date', f.from).lte('entry_date', f.to)
+              .order('entry_date').order('fiscal_year').order('entry_no').order('line_no').range(0, 4999)]).then(function (r) {
+            if (r[1].error) throw r[1].error;
+            var op = 0; r[0].forEach(function (x) { if (x.account_id === ac.id) op = Number(x.opening_balance); });
+            var bal = op, td = 0, tc = 0, rows = [row('sub', [T(''), T(''), T('رصيد أول المدة'), T(''), T(''), N(null), N(null), N(op)])];
+            var ls = r[1].data || [];
+            ls.forEach(function (l) {
+              var d = Number(l.debit), cr = Number(l.credit); bal += d - cr; td += d; tc += cr;
+              rows.push(row('', [T(l.entry_date), T(l.fiscal_year + '/' + l.entry_no), T([l.description, l.line_description].filter(Boolean).join(' — ')),
+                T(l.party_name || l.payee_name || ''), T(l.project_code || ''), N(d || null), N(cr || null), N(bal)]));
+            });
+            rows.push(row('tot', [T(''), T(''), T('الإجمالي / رصيد آخر المدة'), T(''), T(''), N(td), N(tc), N(bal)]));
+            return { cols: ['التاريخ', 'رقم القيد', 'البيان', 'الطرف', 'مشروع', 'مدين', 'دائن', 'الرصيد'], nums: [5, 6, 7], rows: rows,
+              notes: ls.length >= 5000 ? [{ t: 'تم عرض أول 5000 حركة فقط؛ ضيّق الفترة.', bad: true }] : [] };
           });
-          rows.push(row('tot', [T(''), T(''), T('الإجمالي / رصيد آخر المدة'), T(''), T(''), N(td), N(tc), N(bal)]));
-          return { cols: ['التاريخ', 'رقم القيد', 'البيان', 'الطرف', 'مشروع', 'مدين', 'دائن', 'الرصيد'], nums: [5, 6, 7], rows: rows,
-            notes: ls.length >= 5000 ? [{ t: 'تم عرض أول 5000 حركة فقط؛ ضيّق الفترة.', bad: true }] : [] };
         });
       }
+      return p;
+    }
+
+    /* ---------- دمج الشركات («الكل» = إجمالي إداري، مش قوائم مجمّعة) ---------- */
+    function keyOf(cls, texts) {
+      var tok = String(texts[0] || '').split(/\s+/)[0];
+      return /^[0-9][0-9.\-]*$/.test(tok) ? cls + '|' + tok : cls + '|' + texts.join('\u0001');
+    }
+    function mergeModels(models, targets, t) {
+      var span = models[0].cols.length;
+      var notes = [{ t: 'إجمالي إداري: جمع أرقام الشركات بالكود، بدون استبعاد التعاملات بين الشركات — ده مش قوائم مجمّعة (موحّدة).', info: true }];
+      var anyBad = false;
+      models.forEach(function (m, i) { m.notes.forEach(function (n) { if (n.bad) { anyBad = true; notes.push({ t: targets[i].short + ': ' + n.t, bad: true }); } }); });
+      if (!anyBad && models.every(function (m) { return m.notes.some(function (n) { return n.ok; }); })) notes.push({ t: 'كل شركة على حدة: متوازنة ومتطابقة.', ok: true });
+      if (t === 'st') {
+        var rows = [];
+        models.forEach(function (m, i) { rows.push(row('h', [{ v: targets[i].name, span: span }])); m.rows.forEach(function (r) { rows.push(r); }); });
+        return { cols: models[0].cols, nums: models[0].nums, rows: rows, notes: notes };
+      }
+      var base = models[0], tc = base.nums[0], wide = base.nums.length === 1 || (base.cols.length === 3 && base.cols[2] === 'الفترة السابقة'), cmp = base.nums.length === 2 && wide;
+      var order = [], map = {};
+      models.forEach(function (m, ci) {
+        var anchor = -1;
+        m.rows.forEach(function (r) {
+          var texts = r.cells.slice(0, tc).map(function (c) { return c.v === null || c.v === undefined ? '' : c.v; }), k = keyOf(r.cls, texts), idx = order.indexOf(k);
+          if (idx < 0) { idx = anchor + 1; order.splice(idx, 0, k); map[k] = { cls: r.cls, texts: texts, vals: [] }; }
+          anchor = idx; map[k].vals[ci] = r.cells.slice(tc);
+        });
+      });
+      function sum(list) { var s = 0, any = false; list.forEach(function (c) { if (c && c.v !== null && c.v !== undefined && c.v !== '') { s += Number(c.v); any = true; } }); return any ? s : null; }
+      var cols, nums = [], out = [];
+      if (wide) {
+        cols = base.cols.slice(0, tc).concat(targets.map(function (c) { return c.short; }), ['إجمالي إداري']); if (cmp) cols.push('إجمالي الفترة السابقة');
+        for (var i = tc; i < cols.length; i++) nums.push(i);
+      } else { cols = base.cols; nums = base.nums; }
+      order.forEach(function (k) {
+        var e = map[k], cells = e.texts.map(T);
+        if (wide) {
+          var cur = targets.map(function (_, ci) { return e.vals[ci] ? e.vals[ci][0] : null; });
+          cur.forEach(function (c) { cells.push(N(c ? c.v : null)); });
+          cells.push(N(sum(cur)));
+          if (cmp) cells.push(N(sum(targets.map(function (_, ci) { return e.vals[ci] ? e.vals[ci][1] : null; }))));
+        } else {
+          for (var j = 0; j < base.nums.length; j++) cells.push(N(sum(targets.map(function (_, ci) { return e.vals[ci] ? e.vals[ci][j] : null; }))));
+        }
+        out.push(row(e.cls, cells));
+      });
+      return { cols: cols, nums: nums, rows: out, notes: notes };
+    }
+
+    function run() {
+      var f = R.f, t = f.rtype, targets = ctx.targets(), a = null;
+      R.err = ''; R.model = null;
+      if (!f.to || (t !== 'bs' && !f.from)) { R.err = 'حدد التاريخ.'; view(); return Promise.resolve(); }
+      if (t !== 'bs' && f.from > f.to) { R.err = 'تاريخ البداية بعد النهاية.'; view(); return Promise.resolve(); }
+      var period = t === 'bs' ? 'كما في ' + f.to : 'من ' + f.from + ' إلى ' + f.to;
+      if (t === 'st') {
+        a = findAcc(f.acc); if (!a) { R.err = 'اختر الحساب من القائمة (حساب فرعي قابل للترحيل).'; view(); return Promise.resolve(); }
+        period += ' — ' + a.code + ' ' + a.name;
+      }
+      var label = targets.length > 1 ? 'إجمالي الشركات (إداري): ' + targets.map(function (c) { return c.short; }).join(' + ') : S.company.name;
       R.busy = true; view();
-      return p.then(function (m) { R.busy = false; m.title = TITLE[t]; m.period = period; R.model = m; },
-        function (e) { R.busy = false; R.err = ctx.translate(e); }).then(view);
+      return Promise.all(targets.map(function (c) { return one(c, a); })).then(function (ms) {
+        var m = ms.length > 1 ? mergeModels(ms, targets, t) : ms[0];
+        R.busy = false; m.title = TITLE[t]; m.period = period; m.company = label; R.model = m;
+      }, function (e) { R.busy = false; R.err = ctx.translate(e); }).then(view);
     }
 
     /* ---------- العرض ---------- */
     function cell(c, isNum) {
+      if (c.span) return '<td colspan="' + c.span + '">' + esc(c.v) + '</td>';
       if (c.v === null || c.v === undefined || c.v === '') return '<td></td>';
       return c.num || isNum ? '<td class="num">' + money(c.v) + '</td>' : '<td>' + esc(c.v) + '</td>';
     }
@@ -164,6 +226,7 @@
       var h = ctx.topbar() + '<div class="wrap wide"><h2>القوائم المالية</h2>' +
         '<datalist id="rp_acc">' + accs.map(function (a) { return '<option value="' + esc(a.code + ' ' + a.name) + '">'; }).join('') + '</datalist>' +
         '<form class="card rpform" data-form="rp"><div class="g5">' +
+        '<div><label>الشركة</label><select name="scope">' + ctx.scopeOptions().map(function (o) { return '<option value="' + esc(o[0]) + '"' + (o[0] === ctx.scopeValue() ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select></div>' +
         '<div><label>القائمة</label><select name="rtype">' + TYPES.map(function (x) { return '<option value="' + x[0] + '"' + (x[0] === t ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('') + '</select></div>' +
         (t === 'bs' ? '' : '<div><label>من تاريخ</label><input type="date" name="from" value="' + esc(f.from) + '"></div>') +
         '<div><label>' + (t === 'bs' ? 'كما في تاريخ' : 'إلى تاريخ') + '</label><input type="date" name="to" value="' + esc(f.to) + '"></div>' +
@@ -176,8 +239,8 @@
         '<button type="button" data-act="rp-csv"' + (m ? '' : ' disabled') + '>تصدير Excel (CSV)</button></div></form>';
       if (R.err) h += '<div class="err">' + esc(R.err) + '</div>';
       if (m) {
-        h += '<div class="card rpout"><div class="rphead"><strong>' + esc(S.company.name) + '</strong><div>' + esc(m.title) + '</div><div>' + esc(m.period) + '</div></div>';
-        m.notes.forEach(function (n) { h += '<div class="' + (n.bad ? 'errs' : 'okbox') + '">' + esc(n.t) + '</div>'; });
+        h += '<div class="card rpout"><div class="rphead"><strong>' + esc(m.company || S.company.name) + '</strong><div>' + esc(m.title) + '</div><div>' + esc(m.period) + '</div></div>';
+        m.notes.forEach(function (n) { h += '<div class="' + (n.bad ? 'errs' : n.info ? 'rpinfo' : 'okbox') + '">' + esc(n.t) + '</div>'; });
         h += '<div class="sheetwrap"><table class="reg rp"><thead><tr>' + m.cols.map(function (c, i) { return '<th' + (m.nums.indexOf(i) >= 0 ? ' class="num"' : '') + '>' + esc(c) + '</th>'; }).join('') + '</tr></thead><tbody>';
         if (!m.rows.length) h += '<tr><td colspan="' + m.cols.length + '" class="empty">لا توجد بيانات في هذه الفترة.</td></tr>';
         m.rows.forEach(function (r) { h += '<tr class="' + r.cls + '">' + r.cells.map(function (c, i) { return cell(c, m.nums.indexOf(i) >= 0); }).join('') + '</tr>'; });
@@ -187,7 +250,7 @@
     }
     function csv() {
       var m = R.model; if (!m) return;
-      var rows = [[S.company.name], [m.title], [m.period], [], m.cols];
+      var rows = [[m.company || S.company.name], [m.title], [m.period], [], m.cols];
       m.rows.forEach(function (r) { rows.push(r.cells.map(function (c, i) { return c.num || m.nums.indexOf(i) >= 0 ? (c.v === null || c.v === '' ? '' : rawNum(c.v)) : (c.v || ''); })); });
       ctx.download(m.title + '.csv', '﻿' + rows.map(function (r) { return r.map(ctx.csvCell).join(','); }).join('\r\n'));
     }
@@ -197,10 +260,12 @@
     }
     function submit(form) { readF(form); return run(); }
     function change(el) {
+      if (el.name === 'scope') { readF(el.form); R.model = null; R.err = ''; return ctx.setScope(el.value); }
       if (el.name !== 'rtype') return;
       readF(el.form); R.model = null; R.err = ''; view();
     }
-    return { view: view, click: click, submit: submit, change: change, init: init };
+    function scopeChanged() { R.model = null; R.err = ''; }
+    return { view: view, click: click, submit: submit, change: change, init: init, scopeChanged: scopeChanged };
   }
   root.AccReports = { create: create };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.AccReports;

@@ -86,13 +86,14 @@
       return Promise.all([
         sb.from('projects').select('id,code,name,status').eq('company_id', id).order('code'),
         sb.from('cost_centers').select('id,code,name,active').eq('company_id', id).order('code'),
-        sb.from('party_companies').select('party_id,active,parties(id,name,kind,active,vat_number)').eq('company_id', id),
+        sb.from('party_companies').select('party_id,active,parties(id,name,kind,active,vat_number)').in('company_id', ctx.scopeIds ? ctx.scopeIds() : [id]),
         sb.from('equipment').select('id,code,name,sold_date').eq('owner_company_id', id).order('code')
       ]).then(function (r) {
         for (var i = 0; i < 3; i++) if (r[i].error) throw r[i].error;
         D.projects = (r[0].data || []).filter(function (p) { return p.status === 'active'; });
         D.ccs = (r[1].data || []).filter(function (c) { return c.active; });
-        D.parties = (r[2].data || []).filter(function (x) { return x.active && x.parties && x.parties.active; }).map(function (x) { return x.parties; })
+        var seenP = {};
+        D.parties = (r[2].data || []).filter(function (x) { return x.active && x.parties && x.parties.active && !seenP[x.parties.id] && (seenP[x.parties.id] = 1); }).map(function (x) { return x.parties; })
           .sort(function (a, b) { return a.name.localeCompare(b.name, 'ar'); });
         D.equip = r[3].error ? [] : (r[3].data || []).filter(function (e) { return !e.sold_date; });
         D.loaded = true; D.err = '';
@@ -116,8 +117,12 @@
     }
     function partiesOf(kind) { var k = kind === 'sales' ? 'customer' : 'supplier'; return D.parties.filter(function (p) { return p.kind === k; }); }
     function findParty(name, kind) { name = String(name || '').trim(); return partiesOf(kind).filter(function (p) { return p.name === name; })[0] || null; }
-    function canWrite() { return S.company.role === 'admin' || S.company.role === 'accountant' || S.company.role === 'entry'; }
-    function canRev() { return S.company.role === 'admin' || S.company.role === 'accountant'; }
+    function allMode() { return !!(ctx.isAll && ctx.isAll()); }
+    function canWrite() { return !allMode() && S.company.role === 'admin' || S.company.role === 'accountant' || S.company.role === 'entry'; }
+    function canRev() { return allMode() ? S.companies.some(function (c) { return c.role === 'admin' || c.role === 'accountant'; }) : (S.company.role === 'admin' || S.company.role === 'accountant'); }
+    function noteAll() { return allMode() ? '<span class="chip">اختر شركة لإضافة جديد</span>' : '<span class="chip">عرض فقط</span>'; }
+    function coCol(id) { return allMode() ? '<td>' + esc(ctx.coShort(id)) + '</td>' : ''; }
+    function coTh() { return allMode() ? '<th>الشركة</th>' : ''; }
     function opt(v, t, sel) { return '<option value="' + esc(v) + '"' + (sel ? ' selected' : '') + '>' + esc(t) + '</option>'; }
     function msgBlock() {
       var h = '';
@@ -354,7 +359,7 @@
         flt: { kind: '', status: '', party: '', text: '', from: '', to: '' }, p: 0, rows: [], count: 0, entries: {} };
     }
     function loadInvoices() {
-      var F = I.flt, q = sb.from('v_invoice_status').select('*', { count: 'exact' }).eq('company_id', S.company.id);
+      var F = I.flt, q = sb.from('v_invoice_status').select('*', { count: 'exact' }).in('company_id', ctx.scopeIds());
       if (F.kind) q = q.eq('kind', F.kind);
       if (F.status === 'overdue') q = q.gt('days_overdue', 0); else if (F.status) q = q.eq('status', F.status);
       if (F.party) { var p = D.parties.filter(function (x) { return x.name === F.party; })[0]; q = q.eq('party_id', p ? p.id : '00000000-0000-0000-0000-000000000000'); }
@@ -375,7 +380,7 @@
       if (!I) I = blankI();
       var h = ctx.topbar() + '<div class="wrap wide"><div class="bar"><h2 style="margin:0">الفواتير</h2><span class="sp"></span>' +
         '<button class="sm' + (I.tab === 'list' ? ' pri' : '') + '" data-act="dc-itab" data-id="list">السجل</button>' +
-        (canWrite() ? '<button class="sm' + (I.tab === 'new' && I.f.kind === 'purchase' ? ' pri' : '') + '" data-act="dc-inew" data-id="purchase">+ فاتورة مشتريات</button><button class="sm' + (I.tab === 'new' && I.f.kind === 'sales' ? ' pri' : '') + '" data-act="dc-inew" data-id="sales">+ فاتورة مبيعات</button>' : '<span class="chip">عرض فقط</span>') + '</div>' + msgBlock();
+        (canWrite() ? '<button class="sm' + (I.tab === 'new' && I.f.kind === 'purchase' ? ' pri' : '') + '" data-act="dc-inew" data-id="purchase">+ فاتورة مشتريات</button><button class="sm' + (I.tab === 'new' && I.f.kind === 'sales' ? ' pri' : '') + '" data-act="dc-inew" data-id="sales">+ فاتورة مبيعات</button>' : noteAll()) + '</div>' + msgBlock();
       h += I.tab === 'new' ? invForm() : invList();
       rootEl.innerHTML = h + '</div>'; renderModal();
     }
@@ -388,11 +393,11 @@
         inp('party', 'الطرف', ' list="dl_ip"') + inp('text', 'رقم الفاتورة يحتوي') +
         '<div><label>من تاريخ</label><input type="date" name="from" value="' + esc(F.from) + '"></div><div><label>إلى تاريخ</label><input type="date" name="to" value="' + esc(F.to) + '"></div></div>' +
         '<div class="mf" style="justify-content:flex-start"><button class="pri" type="submit">بحث</button><button type="button" data-act="dc-iclear">مسح</button></div></form>';
-      h += '<p class="mut">' + I.count + ' فاتورة' + (I.count > PAGE_SZ ? ' · صفحة ' + (I.p + 1) + ' من ' + pages : '') + '</p><div class="sheetwrap"><table class="reg"><thead><tr><th>التاريخ</th><th>رقم الفاتورة</th><th>النوع</th><th>الطرف</th><th>الإجمالي</th><th>المسدد</th><th>المتبقي</th><th>الاستحقاق</th><th>الحالة</th><th>القيد</th><th></th></tr></thead><tbody>';
-      if (!I.rows.length) h += '<tr><td colspan="11" class="empty">لا توجد فواتير.</td></tr>';
+      h += '<p class="mut">' + I.count + ' فاتورة' + (I.count > PAGE_SZ ? ' · صفحة ' + (I.p + 1) + ' من ' + pages : '') + '</p><div class="sheetwrap"><table class="reg"><thead><tr>' + coTh() + '<th>التاريخ</th><th>رقم الفاتورة</th><th>النوع</th><th>الطرف</th><th>الإجمالي</th><th>المسدد</th><th>المتبقي</th><th>الاستحقاق</th><th>الحالة</th><th>القيد</th><th></th></tr></thead><tbody>';
+      if (!I.rows.length) h += '<tr><td colspan="12" class="empty">لا توجد فواتير.</td></tr>';
       I.rows.forEach(function (x) {
         var ret = x.kind === 'purchase_return' || x.kind === 'sales_return', st = x.status;
-        h += '<tr class="' + (st === 'cancelled' ? 'off' : '') + '"><td class="code">' + esc(x.invoice_date) + '</td><td>' + esc(x.invoice_no) + '</td><td>' + esc(KIND_AR[x.kind] || x.kind) + '</td><td>' + esc(x.party_name) + '</td>' +
+        h += '<tr class="' + (st === 'cancelled' ? 'off' : '') + '">' + coCol(x.company_id) + '<td class="code">' + esc(x.invoice_date) + '</td><td>' + esc(x.invoice_no) + '</td><td>' + esc(KIND_AR[x.kind] || x.kind) + '</td><td>' + esc(x.party_name) + '</td>' +
           '<td class="num">' + fmt(x.total) + '</td><td class="num">' + fmt(x.allocated) + '</td><td class="num">' + fmt(x.remaining) + '</td><td class="code">' + esc(x.due_date || '') + (x.days_overdue ? ' <span class="chip w">متأخرة ' + x.days_overdue + ' يوم</span>' : '') + '</td>' +
           '<td><span class="chip' + (st === 'paid' ? ' g' : st === 'cancelled' ? ' w' : '') + '">' + esc(ST_AR[st] || st) + '</span></td><td class="code">' + esc(I.entries[x.entry_id] || '') + '</td><td style="white-space:nowrap">' +
           '<button class="sm" data-act="dc-iatt" data-id="' + esc(x.invoice_id) + '" data-t="' + esc(x.invoice_no) + '">مرفقات</button> ' +
@@ -525,7 +530,7 @@
       });
     }
     function loadVouchers() {
-      return sb.from('journal_entries').select('id,fiscal_year,entry_no,entry_date,description,voucher_type', { count: 'exact' }).eq('company_id', S.company.id).in('voucher_type', ['payment', 'receipt'])
+      return sb.from('journal_entries').select('id,fiscal_year,entry_no,entry_date,description,voucher_type', { count: 'exact' }).in('company_id', ctx.scopeIds()).in('voucher_type', ['payment', 'receipt'])
         .order('entry_date', { ascending: false }).order('entry_no', { ascending: false }).range(V.p * PAGE_SZ, V.p * PAGE_SZ + PAGE_SZ - 1).then(function (r) {
           if (r.error) throw r.error; V.rows = r.data || []; V.count = r.count === null || r.count === undefined ? V.rows.length : r.count; V.lines = {};
           var ids = V.rows.map(function (x) { return x.id; }); if (!ids.length) return;
@@ -536,16 +541,16 @@
       if (!V) V = blankV();
       var h = ctx.topbar() + '<div class="wrap wide"><div class="bar"><h2 style="margin:0">السندات</h2><span class="sp"></span>' +
         '<button class="sm' + (V.tab === 'list' ? ' pri' : '') + '" data-act="dc-vtab" data-id="list">السجل</button>' +
-        (canWrite() ? '<button class="sm' + (V.tab === 'new' ? ' pri' : '') + '" data-act="dc-vtab" data-id="new">+ سند جديد</button>' : '<span class="chip">عرض فقط</span>') + '</div>' + msgBlock();
+        (canWrite() ? '<button class="sm' + (V.tab === 'new' ? ' pri' : '') + '" data-act="dc-vtab" data-id="new">+ سند جديد</button>' : noteAll()) + '</div>' + msgBlock();
       h += V.tab === 'new' ? vchForm() : vchList();
       rootEl.innerHTML = h + '</div>'; renderModal();
     }
     function vchList() {
       var pages = Math.max(1, Math.ceil(V.count / PAGE_SZ));
-      var h = '<p class="mut">' + V.count + ' سند' + (V.count > PAGE_SZ ? ' · صفحة ' + (V.p + 1) + ' من ' + pages : '') + '</p><div class="sheetwrap"><table class="reg"><thead><tr><th>القيد</th><th>التاريخ</th><th>النوع</th><th>البيان</th><th>المبلغ</th><th></th></tr></thead><tbody>';
-      if (!V.rows.length) h += '<tr><td colspan="6" class="empty">لا توجد سندات.</td></tr>';
+      var h = '<p class="mut">' + V.count + ' سند' + (V.count > PAGE_SZ ? ' · صفحة ' + (V.p + 1) + ' من ' + pages : '') + '</p><div class="sheetwrap"><table class="reg"><thead><tr>' + coTh() + '<th>القيد</th><th>التاريخ</th><th>النوع</th><th>البيان</th><th>المبلغ</th><th></th></tr></thead><tbody>';
+      if (!V.rows.length) h += '<tr><td colspan="7" class="empty">لا توجد سندات.</td></tr>';
       V.rows.forEach(function (e) {
-        h += '<tr><td class="code">' + esc(e.fiscal_year + '/' + e.entry_no) + '</td><td class="code">' + esc(e.entry_date) + '</td><td>' + (e.voucher_type === 'receipt' ? 'قبض' : 'صرف') + '</td><td>' + esc(e.description) + '</td><td class="num">' + fmt(V.lines[e.id]) + '</td><td style="white-space:nowrap">' +
+        h += '<tr>' + coCol(e.company_id) + '<td class="code">' + esc(e.fiscal_year + '/' + e.entry_no) + '</td><td class="code">' + esc(e.entry_date) + '</td><td>' + (e.voucher_type === 'receipt' ? 'قبض' : 'صرف') + '</td><td>' + esc(e.description) + '</td><td class="num">' + fmt(V.lines[e.id]) + '</td><td style="white-space:nowrap">' +
           '<button class="sm" data-act="dc-vatt" data-id="' + esc(e.id) + '" data-t="' + esc(e.fiscal_year + '/' + e.entry_no) + '">مرفقات</button> ' +
           (canRev() ? '<button class="sm danger" data-act="dc-irev" data-id="' + esc(e.id) + '" data-t="' + esc(e.fiscal_year + '/' + e.entry_no) + '">عكس</button>' : '') + '</td></tr>';
       });
