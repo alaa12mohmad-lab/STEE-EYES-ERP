@@ -116,7 +116,14 @@ table.rp tr.chk td{color:var(--mut);font-size:.85rem}
   table.sheet th{position:static}
 }
 .itm{border:1px solid var(--bd);border-radius:10px;padding:.6rem;margin:.5rem 0;background:var(--bg)}
-.itmhead{display:grid;grid-template-columns:auto 1.2fr 1.4fr 9rem auto;gap:.4rem;align-items:center}
 .itmdims{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.4rem;align-items:center}
 .itmdims select{width:auto;min-width:9rem;flex:1}
-@media(max-width:700px){.itmhead{grid-template-columns:1fr 1fr}}
+form.inv-purchase{border-top:5px solid var(--warn)}
+form.inv-sales{border-top:5px solid var(--ok)}
+h3.sec{font-size:.95rem;margin:1rem 0 .3rem;color:var(--mut)}
+.itmhead{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
+.itmhead .f-desc{flex:1 1 11rem;width:auto}.itmhead .f-acc{flex:1.4 1 13rem;width:auto}.itmhead .f-amt{flex:0 0 8rem;width:auto}
+.itmhead select{flex:1 1 8rem;width:auto;min-width:7rem}
+table.prev td,table.prev th{padding:.3rem .5rem;border-bottom:1px solid var(--bd)}
+table.prev select{min-width:14rem}
+details.more{margin-top:.8rem}details.more summary{cursor:pointer;color:var(--mut)}

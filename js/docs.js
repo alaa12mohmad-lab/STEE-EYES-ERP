@@ -228,17 +228,19 @@
       var h = '<datalist id="dl_dist_' + which + '">' + list.map(function (a) { return '<option value="' + esc(a.code + ' ' + a.name) + '">'; }).join('') + '</datalist>';
       items.forEach(function (it, i) {
         var a = findAcc(it.acc, list), multi = it.splits.length > 1, anyDim = a && (dimOk(a, 'project_rule') || dimOk(a, 'cost_center_rule') || dimOk(a, 'equipment_rule'));
-        h += '<div class="itm" data-item="' + i + '"><div class="itmhead"><span class="chip">بند ' + (i + 1) + '</span>' +
-          '<input data-if="desc" data-i="' + i + '" placeholder="وصف البند (مثال: حديد تسليح)" value="' + esc(it.desc) + '">' +
-          '<input data-if="acc" data-i="' + i + '" list="dl_dist_' + which + '" placeholder="الحساب (كود أو اسم)" value="' + esc(it.acc) + '">' +
-          '<input data-if="amt" data-i="' + i + '" class="num" dir="ltr" inputmode="decimal" placeholder="المبلغ قبل الضريبة" value="' + esc(it.amt) + '">' +
-          (items.length > 1 ? '<button type="button" class="sm danger" data-act="dc-delitem" data-id="' + i + '" title="حذف البند">✕</button>' : '') + '</div>';
+        var single = '';
         if (!multi) {
-          var sp = it.splits[0];
-          h += '<div class="itmdims">' + dimSel('project', D.projects, sp.project, !dimOk(a, 'project_rule'), i, 0, 'المشروع') + dimSel('cc', D.ccs, sp.cc, !dimOk(a, 'cost_center_rule'), i, 0, 'مركز التكلفة') +
-            dimSel('eq', D.equip, sp.eq, !dimOk(a, 'equipment_rule'), i, 0, 'المعدة') +
-            '<button type="button" class="sm" data-act="dc-split" data-id="' + i + '"' + (anyDim || !a ? '' : ' disabled') + '>تقسيم على أكثر من مشروع / مركز</button></div>';
-        } else {
+          var sp0 = it.splits[0];
+          single = dimSel('project', D.projects, sp0.project, !dimOk(a, 'project_rule'), i, 0, 'المشروع') + dimSel('cc', D.ccs, sp0.cc, !dimOk(a, 'cost_center_rule'), i, 0, 'مركز التكلفة') +
+            (D.equip.length ? dimSel('eq', D.equip, sp0.eq, !dimOk(a, 'equipment_rule'), i, 0, 'المعدة') : '') +
+            '<button type="button" class="sm" data-act="dc-split" data-id="' + i + '" title="تقسيم البند على أكثر من مشروع / مركز تكلفة"' + (anyDim || !a ? '' : ' disabled') + '>⇆ تقسيم</button>';
+        }
+        h += '<div class="itm" data-item="' + i + '"><div class="itmhead"><span class="chip">' + (i + 1) + '</span>' +
+          '<input class="f-desc" data-if="desc" data-i="' + i + '" placeholder="وصف البند" value="' + esc(it.desc) + '">' +
+          '<input class="f-acc" data-if="acc" data-i="' + i + '" list="dl_dist_' + which + '" placeholder="الحساب (كود أو اسم)" value="' + esc(it.acc) + '">' +
+          '<input class="num f-amt" data-if="amt" data-i="' + i + '" dir="ltr" inputmode="decimal" placeholder="المبلغ" value="' + esc(it.amt) + '">' + single +
+          (items.length > 1 ? '<button type="button" class="sm danger" data-act="dc-delitem" data-id="' + i + '" title="حذف البند">✕</button>' : '') + '</div>';
+        if (multi) {
           h += '<table class="lines"><thead><tr><th>المشروع</th><th>مركز التكلفة</th><th>المعدة</th><th>النسبة %</th><th>المبلغ</th><th></th></tr></thead><tbody>';
           it.splits.forEach(function (sp, j) {
             h += '<tr><td>' + dimSel('project', D.projects, sp.project, !dimOk(a, 'project_rule'), i, j, 'المشروع') + '</td><td>' + dimSel('cc', D.ccs, sp.cc, !dimOk(a, 'cost_center_rule'), i, j, 'مركز التكلفة') + '</td><td>' + dimSel('eq', D.equip, sp.eq, !dimOk(a, 'equipment_rule'), i, j, 'المعدة') + '</td>' +
@@ -335,19 +337,20 @@
       if (f) {
         it[f] = el.value;
         if (f === 'acc') syncItem(i, items, kind);
-        if (f === 'amt') { if (it.splits.length > 1) { recalcFromPct(it); pushAmts(i, items); } syncItem(i, items, kind); if (S.view === 'invoices') updateTotals(); }
+        if (f !== 'amt') { if (S.view === 'invoices') updatePreview(); else updateVPreview(); }
+        if (f === 'amt') { if (it.splits.length > 1) { recalcFromPct(it); pushAmts(i, items); } syncItem(i, items, kind); if (S.view === 'invoices') updateTotals(); else updateVPreview(); }
         return;
       }
       var j = +el.getAttribute('data-j'), sp = it.splits[j]; sp[sf] = el.value;
       if (sf === 'pct') { var pv = num(sp.pct), t = itemAmt(it); sp.amt = t && pv && !isNaN(pv) ? (Math.round(t * pv) / 100).toFixed(2) : ''; pushAmts(i, items); }
       if (sf === 'amt') { var av = num(sp.amt), t2 = itemAmt(it); sp.pct = t2 && av && !isNaN(av) ? pctStr(av / t2 * 100) : ''; pushAmts(i, items); }
-      syncItem(i, items, kind);
+      syncItem(i, items, kind); if (S.view === 'invoices') updatePreview(); else updateVPreview();
     }
 
     /* =================== الفواتير =================== */
+    function blankInvF(kind) { return { kind: kind || 'purchase', party: '', no: '', date: ctx.today(), due: '', edate: '', desc: '', manara: false, manaraNo: '', vat: '', vatEdited: false, dist: [blankItem()], files: [] }; }
     function blankI() {
-      var t = ctx.today();
-      return { tab: 'list', f: { kind: 'purchase', party: '', no: '', date: t, due: '', edate: '', desc: '', manara: false, manaraNo: '', vat: '', vatEdited: false, dist: [blankItem()], files: [] },
+      return { tab: 'list', f: blankInvF('purchase'),
         flt: { kind: '', status: '', party: '', text: '', from: '', to: '' }, p: 0, rows: [], count: 0, entries: {} };
     }
     function loadInvoices() {
@@ -372,7 +375,7 @@
       if (!I) I = blankI();
       var h = ctx.topbar() + '<div class="wrap wide"><div class="bar"><h2 style="margin:0">الفواتير</h2><span class="sp"></span>' +
         '<button class="sm' + (I.tab === 'list' ? ' pri' : '') + '" data-act="dc-itab" data-id="list">السجل</button>' +
-        (canWrite() ? '<button class="sm' + (I.tab === 'new' ? ' pri' : '') + '" data-act="dc-itab" data-id="new">+ فاتورة جديدة</button>' : '<span class="chip">عرض فقط</span>') + '</div>' + msgBlock();
+        (canWrite() ? '<button class="sm' + (I.tab === 'new' && I.f.kind === 'purchase' ? ' pri' : '') + '" data-act="dc-inew" data-id="purchase">+ فاتورة مشتريات</button><button class="sm' + (I.tab === 'new' && I.f.kind === 'sales' ? ' pri' : '') + '" data-act="dc-inew" data-id="sales">+ فاتورة مبيعات</button>' : '<span class="chip">عرض فقط</span>') + '</div>' + msgBlock();
       h += I.tab === 'new' ? invForm() : invList();
       rootEl.innerHTML = h + '</div>'; renderModal();
     }
@@ -406,27 +409,59 @@
       return { net: net, vat: r2(vat), total: r2(net + vat) };
     }
     function invForm() {
-      var f = I.f, pu = f.kind === 'purchase', k = pu ? 'ap' : 'ar', vk = pu ? 'vin' : 'vout', t = invTotals(f), p = findParty(f.party, f.kind);
-      f.ctl = defaultAcc(k, f.ctl); f.vatAcc = defaultAcc(vk, f.vatAcc);
-      var h = '<form class="card" data-form="dc-inv" data-docs="inv">';
-      h += '<datalist id="dl_pp">' + partiesOf(f.kind).map(function (x) { return '<option value="' + esc(x.name) + '">'; }).join('') + '</datalist>' +
-        '<div class="g5"><div><label>نوع الفاتورة</label><select data-ff="kind">' + opt('purchase', 'مشتريات (من مورد)', f.kind === 'purchase') + opt('sales', 'مبيعات (لعميل)', f.kind === 'sales') + '</select></div>' +
-        '<div><label>' + (f.kind === 'purchase' ? 'المورد' : 'العميل') + '</label><input data-ff="party" list="dl_pp" value="' + esc(f.party) + '"><div class="mut" id="pinfo" style="font-size:.78rem">' + partyInfo(p, f.kind) + '</div></div>' +
+      var f = I.f, pu = f.kind === 'purchase', t = invTotals(f), p = findParty(f.party, f.kind);
+      f.ctl = defaultAcc(pu ? 'ap' : 'ar', f.ctl); f.vatAcc = defaultAcc(pu ? 'vin' : 'vout', f.vatAcc);
+      var h = '<form class="card inv-' + f.kind + '" data-form="dc-inv" data-docs="inv"><h2 style="margin-top:0">' + (pu ? 'فاتورة مشتريات — من مورد' : 'فاتورة مبيعات — لعميل') + '</h2>' +
+        '<datalist id="dl_pp">' + partiesOf(f.kind).map(function (x) { return '<option value="' + esc(x.name) + '">'; }).join('') + '</datalist>' +
+        '<div class="g5"><div><label>' + (pu ? 'المورد' : 'العميل') + '</label><input data-ff="party" list="dl_pp" value="' + esc(f.party) + '"><div class="mut" id="pinfo" style="font-size:.78rem">' + partyInfo(p, f.kind) + '</div></div>' +
         '<div><label>رقم الفاتورة</label><input data-ff="no" dir="ltr" value="' + esc(f.no) + '"></div>' +
         '<div><label>تاريخ الفاتورة</label><input type="date" data-ff="date" value="' + esc(f.date) + '"></div>' +
-        '<div><label>تاريخ الاستحقاق</label><input type="date" data-ff="due" value="' + esc(f.due) + '"></div>' +
-        '<div><label>تاريخ القيد (اختياري)</label><input type="date" data-ff="edate" value="' + esc(f.edate) + '"></div></div>' +
-        '<div class="g5">' + accSelect(k, 'data-ff="ctl"', f.ctl, pu ? 'حساب الموردين (المستحق للمورد)' : 'حساب العملاء (المستحق على العميل)') + accSelect(vk, 'data-ff="vatAcc"', f.vatAcc, pu ? 'حساب ضريبة المدخلات' : 'حساب ضريبة المخرجات') + '</div>' +
-        '<fieldset><legend>توزيع الفاتورة على الحسابات (' + (f.kind === 'purchase' ? 'مصروف / أصل' : 'إيراد') + ')</legend>' + distHtml(f.dist, f.kind, 'inv') + '</fieldset>' +
-        '<div class="g5"><div><label>صافي الفاتورة</label><input id="t_net" disabled value="' + fmt(t.net) + '"></div>' +
-        '<div><label>الضريبة (15% تلقائي — عدّلها لو مختلفة)</label><input data-ff="vat" class="num" dir="ltr" inputmode="decimal" value="' + esc(f.vatEdited ? f.vat : (t.vat ? t.vat.toFixed(2) : '')) + '" placeholder="0.00"></div>' +
-        '<div><label>الإجمالي</label><input id="t_total" disabled value="' + fmt(t.total) + '"></div></div>' +
-        '<label>البيان (اختياري — يتولّد تلقائيًا)</label><input data-ff="desc" value="' + esc(f.desc) + '">' +
-        '<label class="chk"><input type="checkbox" data-ff="manara"' + (f.manara ? ' checked' : '') + '> اتسجلت في المنارة</label>' + (f.manara ? '<label>رقم القيد في المنارة</label><input data-ff="manaraNo" value="' + esc(f.manaraNo) + '">' : '') +
-        filesBlock(f.files, f.kind === 'purchase');
-      h += '<div class="mf"><button type="button" data-act="dc-itab" data-id="list">إلغاء</button><button class="pri" type="submit"' + (D.busy ? ' disabled' : '') + '>' + (D.busy ? 'جارٍ الحفظ…' : 'حفظ الفاتورة وإنشاء القيد') + '</button></div></form>';
+        '<div><label>تاريخ الاستحقاق</label><input type="date" data-ff="due" value="' + esc(f.due) + '"></div></div>' +
+        '<h3 class="sec">' + (pu ? 'البنود (مصروف أو أصل)' : 'البنود (إيراد)') + '</h3>' + distHtml(f.dist, f.kind, 'inv') +
+        '<div class="g5" style="margin-top:.6rem"><div><label>الضريبة (15% تلقائي)</label><input data-ff="vat" class="num" dir="ltr" inputmode="decimal" value="' + esc(f.vatEdited ? f.vat : (t.vat ? t.vat.toFixed(2) : '')) + '" placeholder="0.00"></div>' +
+        '<div><label>الصافي</label><input id="t_net" disabled value="' + fmt(t.net) + '"></div><div><label>الإجمالي</label><input id="t_total" disabled value="' + fmt(t.total) + '"></div></div>' +
+        filesBlock(f.files, pu) +
+        '<h3 class="sec">القيد الناتج</h3><div id="prev">' + invPreview(f) + '</div>' +
+        '<details class="more"><summary>خيارات إضافية</summary><div class="g5"><div><label>تاريخ القيد (الافتراضي = تاريخ الفاتورة)</label><input type="date" data-ff="edate" value="' + esc(f.edate) + '"></div></div>' +
+        '<label>البيان (يتولّد تلقائيًا لو فاضي)</label><input data-ff="desc" value="' + esc(f.desc) + '">' +
+        '<label class="chk"><input type="checkbox" data-ff="manara"' + (f.manara ? ' checked' : '') + '> اتسجلت في المنارة</label>' + (f.manara ? '<label>رقم القيد في المنارة</label><input data-ff="manaraNo" value="' + esc(f.manaraNo) + '">' : '') + '</details>';
+      h += '<div class="mf"><button type="button" data-act="dc-itab" data-id="list">إلغاء</button><button class="pri" type="submit"' + (D.busy ? ' disabled' : '') + '>' + (D.busy ? 'جارٍ الحفظ…' : 'حفظ الفاتورة') + '</button></div></form>';
       return h;
     }
+    /* معاينة القيد: هنا (وبس) بتظهر حسابات الموردين/العملاء والضريبة */
+    function prevAcc(k, attr, val) {
+      var c = candidates(k);
+      if (!c.length) return '<span style="color:var(--err)">لا يوجد في الشجرة — ' + esc(ROLE_DEF[k].name) + '. عدّل إعدادات الحساب من شاشة الحسابات.</span>';
+      if (c.length === 1) return esc(c[0].code + ' ' + c[0].name);
+      return '<select ' + attr + '><option value="">— اختر الحساب —</option>' + c.map(function (x) { return opt(x.id, x.code + ' ' + x.name, x.id === val); }).join('') + '</select>';
+    }
+    function itemRows(items, kind, side) {
+      var list = distAccounts(kind), rows = '';
+      items.forEach(function (it) {
+        var a = findAcc(it.acc, list); if (!a) return;
+        it.splits.forEach(function (sp) {
+          var amt = splitAmt(it, sp); if (!amt) return;
+          var pr = D.projects.filter(function (x) { return x.id === sp.project; })[0], cc = D.ccs.filter(function (x) { return x.id === sp.cc; })[0];
+          rows += '<tr><td>' + esc(a.code + ' ' + a.name) + ((pr || cc) ? ' <span class="mut">' + esc([pr && pr.code, cc && cc.code].filter(Boolean).join(' / ')) + '</span>' : '') + '</td><td class="num">' + (side === 'd' ? fmt(amt) : '') + '</td><td class="num">' + (side === 'c' ? fmt(amt) : '') + '</td></tr>';
+        });
+      });
+      return rows;
+    }
+    function invPreview(f) {
+      var pu = f.kind === 'purchase', t = invTotals(f), pn = esc(f.party || (pu ? 'المورد' : 'العميل'));
+      var h = '<table class="lines prev"><thead><tr><th>الحساب</th><th class="num">مدين</th><th class="num">دائن</th></tr></thead><tbody>';
+      if (pu) {
+        h += itemRows(f.dist, 'purchase', 'd');
+        if (t.vat > 0) h += '<tr><td>' + prevAcc('vin', 'data-ff="vatAcc"', f.vatAcc) + '</td><td class="num">' + fmt(t.vat) + '</td><td></td></tr>';
+        h += '<tr><td>' + prevAcc('ap', 'data-ff="ctl"', f.ctl) + ' <span class="mut">— ' + pn + '</span></td><td></td><td class="num">' + fmt(t.total) + '</td></tr>';
+      } else {
+        h += '<tr><td>' + prevAcc('ar', 'data-ff="ctl"', f.ctl) + ' <span class="mut">— ' + pn + '</span></td><td class="num">' + fmt(t.total) + '</td><td></td></tr>';
+        h += itemRows(f.dist, 'sales', 'c');
+        if (t.vat > 0) h += '<tr><td>' + prevAcc('vout', 'data-ff="vatAcc"', f.vatAcc) + '</td><td></td><td class="num">' + fmt(t.vat) + '</td></tr>';
+      }
+      return h + '</tbody></table>';
+    }
+    function updatePreview() { var el = rootEl.querySelector('#prev'); if (el && I) { var ae = doc().activeElement; if (ae && el.contains(ae)) return; el.innerHTML = invPreview(I.f); } }
     function partyInfo(p, kind) {
       if (!p) return '';
       return p.vat_number ? 'الرقم الضريبي: ' + esc(p.vat_number) : (kind === 'purchase' ? '<span style="color:var(--warn)">بدون رقم ضريبي — ما ينفعش ضريبة مدخلات</span>' : '');
@@ -435,6 +470,7 @@
       var t = invTotals(I.f), a = rootEl.querySelector('#t_net'), b = rootEl.querySelector('#t_total'), v = rootEl.querySelector('[data-ff=vat]');
       if (a) a.value = fmt(t.net); if (b) b.value = fmt(t.total);
       if (v && !I.f.vatEdited && doc().activeElement !== v) v.value = t.vat ? t.vat.toFixed(2) : '';
+      updatePreview();
     }
     function doc() { return ctx.doc || root.document; }
 
@@ -517,6 +553,20 @@
       if (V.count > PAGE_SZ) h += '<div class="bar" style="margin-top:.6rem"><button class="sm" data-act="dc-vprev"' + (V.p === 0 ? ' disabled' : '') + '>→ السابق</button><span class="mut">صفحة ' + (V.p + 1) + ' من ' + pages + '</span><button class="sm" data-act="dc-vnext"' + (V.p + 1 >= pages ? ' disabled' : '') + '>التالي ←</button></div>';
       return h;
     }
+    function vchPreview(f) {
+      var isE = f.type === 'pay_expense', cash = acc(f.cash), cn = cash ? esc(cash.code + ' ' + cash.name) : '<span class="mut">— اختر الصندوق/البنك —</span>';
+      var pn = esc(f.party || (f.type === 'pay_supplier' ? 'المورد' : 'العميل')), amt = r2(num(f.amount) || 0), h = '<table class="lines prev"><thead><tr><th>الحساب</th><th class="num">مدين</th><th class="num">دائن</th></tr></thead><tbody>';
+      if (isE) {
+        var tot = 0; f.dist.forEach(function (it) { tot = r2(tot + itemAmt(it)); });
+        h += itemRows(f.dist, 'purchase', 'd') + '<tr><td>' + cn + '</td><td></td><td class="num">' + fmt(tot) + '</td></tr>';
+      } else if (f.type === 'pay_supplier') {
+        h += '<tr><td>' + prevAcc('ap', 'data-vf="ctl"', f.ctl) + ' <span class="mut">— ' + pn + '</span></td><td class="num">' + fmt(amt) + '</td><td></td></tr><tr><td>' + cn + '</td><td></td><td class="num">' + fmt(amt) + '</td></tr>';
+      } else {
+        h += '<tr><td>' + cn + '</td><td class="num">' + fmt(amt) + '</td><td></td></tr><tr><td>' + prevAcc('ar', 'data-vf="ctl"', f.ctl) + ' <span class="mut">— ' + pn + '</span></td><td></td><td class="num">' + fmt(amt) + '</td></tr>';
+      }
+      return h + '</tbody></table>';
+    }
+    function updateVPreview() { var el = rootEl.querySelector('#vprev'); if (el && V) { var ae = doc().activeElement; if (ae && el.contains(ae)) return; el.innerHTML = vchPreview(V.f); } }
     function allocSum() { var s = 0; Object.keys(V.alloc).forEach(function (k) { s = r2(s + (Number(V.alloc[k]) || 0)); }); return s; }
     function vchForm() {
       var f = V.f, cashAccs = postables().filter(function (a) { return a.is_cash_account; }), isE = f.type === 'pay_expense', ck = f.type === 'pay_supplier' ? 'ap' : 'ar';
@@ -527,11 +577,11 @@
         '<div><label>التاريخ</label><input type="date" data-vf="date" value="' + esc(f.date) + '"></div>' +
         (isE ? '' : '<div><label>' + (f.type === 'pay_supplier' ? 'المورد' : 'العميل') + '</label><input data-vf="party" list="dl_vp" value="' + esc(f.party) + '"></div>') +
         (isE ? '<div><label>المستلم (اسم)</label><input data-vf="payee" value="' + esc(f.payee || '') + '"></div>' : '') + '<div><label>' + (f.type === 'recv_customer' ? 'يُودَع في (صندوق/بنك)' : 'يُصرف من (صندوق/بنك)') + '</label><select data-vf="cash"><option value="">— اختر —</option>' + cashAccs.map(function (a) { return opt(a.id, a.code + ' ' + a.name, a.id === f.cash); }).join('') + '</select></div>' +
-        (isE ? '' : accSelect(ck, 'data-vf="ctl"', f.ctl, f.type === 'pay_supplier' ? 'حساب الموردين' : 'حساب العملاء')) +
         (isE ? '' : '<div><label>المبلغ</label><input data-vf="amount" class="num" dir="ltr" inputmode="decimal" value="' + esc(f.amount) + '"></div>') + '</div>';
       if (isE) h += '<fieldset><legend>المصروفات المدفوعة</legend>' + distHtml(f.dist, 'purchase', 'vch') + '</fieldset>';
       else h += '<fieldset id="allocbox"><legend>تخصيص على الفواتير المفتوحة</legend>' + allocHtml() + '</fieldset>';
-      h += '<label>البيان (اختياري — يتولّد تلقائيًا)</label><input data-vf="desc" value="' + esc(f.desc) + '">' +
+      h += '<h3 class="sec">القيد الناتج</h3><div id="vprev">' + vchPreview(f) + '</div>' +
+        '<label>البيان (اختياري — يتولّد تلقائيًا)</label><input data-vf="desc" value="' + esc(f.desc) + '">' +
         '<label class="chk"><input type="checkbox" data-vf="manara"' + (f.manara ? ' checked' : '') + '> اتسجل في المنارة</label>' + (f.manara ? '<label>رقم القيد في المنارة</label><input data-vf="manaraNo" value="' + esc(f.manaraNo) + '">' : '') +
         filesBlock(f.files, f.type !== 'recv_customer') +
         '<div class="mf"><button type="button" data-act="dc-vtab" data-id="list">إلغاء</button><button class="pri" type="submit"' + (D.busy ? ' disabled' : '') + '>' + (D.busy ? 'جارٍ الحفظ…' : 'حفظ السند وإنشاء القيد') + '</button></div></form>';
@@ -603,12 +653,12 @@
       if (ff) {
         if (el.type === 'checkbox') { I.f[ff] = el.checked; return viewInvoices(); }
         I.f[ff] = el.value; if (ff === 'vat') { I.f.vatEdited = el.value !== ''; updateTotals(); }
-        if (ff === 'party') { var pi = rootEl.querySelector('#pinfo'); if (pi) pi.innerHTML = partyInfo(findParty(el.value, I.f.kind), I.f.kind); }
+        if (ff === 'party') { var pi = rootEl.querySelector('#pinfo'); if (pi) pi.innerHTML = partyInfo(findParty(el.value, I.f.kind), I.f.kind); updatePreview(); }
         return;
       }
       if (vf) {
         if (el.type === 'checkbox') { V.f[vf] = el.checked; return viewVouchers(); }
-        V.f[vf] = el.value; if (vf === 'amount') updateAllocSum();
+        V.f[vf] = el.value; if (vf === 'amount') updateAllocSum(); updateVPreview();
         return;
       }
       if (al) { V.alloc[al] = el.value; updateAllocSum(); }
@@ -627,6 +677,7 @@
     }
     function click(act, id, t) {
       if (act === 'dc-close') { D.modal = null; return renderModal(); }
+      if (act === 'dc-inew') { D.msg = null; D.err = ''; I.f = blankInvF(id); I.tab = 'new'; return viewInvoices(); }
       if (act === 'dc-itab') { D.msg = null; D.err = ''; I.tab = id; return (id === 'list' ? loadInvoices() : Promise.resolve()).then(viewInvoices, function (e) { D.err = ctx.translate(e); viewInvoices(); }); }
       if (act === 'dc-vtab') { D.msg = null; D.err = ''; V.tab = id; return (id === 'list' ? loadVouchers() : loadOpenInv()).then(viewVouchers, function (e) { D.err = ctx.translate(e); viewVouchers(); }); }
       if (act === 'dc-iclear') { I.flt = blankI().flt; I.p = 0; return loadInvoices().then(viewInvoices); }
